@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/server.dart';
+import '../models/share_listener_config.dart';
 import '../providers/app_provider.dart';
 import '../widgets/app_button_styles.dart';
 
@@ -24,6 +25,8 @@ class SettingsScreen extends StatelessWidget {
             child: ListView(
               children: [
                 _buildAppearanceCard(),
+                const SizedBox(height: 24),
+                _buildShareSection(context, provider),
                 const SizedBox(height: 24),
                 _buildLlmSection(context, provider),
               ],
@@ -96,6 +99,302 @@ class SettingsScreen extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildShareSection(BuildContext context, AppProvider provider) {
+    final config = provider.shareListenerConfig;
+    final running = provider.isShareListenerRunning;
+    final runtimeError = provider.shareListenerError;
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '共享侦听',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      '让其他 ShellGuard 通过本机端口访问已分享的服务器资源',
+                      style: TextStyle(fontSize: 13, color: AppColors.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: () => _showShareListenerDialog(context, provider),
+                icon: const Icon(Icons.tune, size: 16),
+                label: const Text('配置侦听'),
+                style: AppButtonStyles.primary(),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Wrap(
+            spacing: 16,
+            runSpacing: 16,
+            children: [
+              _buildShareMetaCard(
+                '当前状态',
+                running ? '运行中' : (config.enabled ? '待启动' : '已关闭'),
+                running ? const Color(0xFF10b981) : const Color(0xFF6b7c93),
+              ),
+              _buildShareMetaCard(
+                '侦听端口',
+                '${config.port}',
+                const Color(0xFF2563eb),
+              ),
+              _buildShareMetaCard(
+                '鉴权模式',
+                config.authMode == ShareAuthMode.none ? '未启用' : 'Token 预留',
+                const Color(0xFFd97706),
+              ),
+            ],
+          ),
+          if (runtimeError != null && runtimeError.trim().isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEF2F2),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFECACA)),
+              ),
+              child: Text(
+                '侦听启动异常：$runtimeError',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF991B1B),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          const Text(
+            '说明：当前版本默认不做鉴权，但数据结构和配置项已经预留好了后续升级入口。分享导出时不会暴露服务器真实 IP、用户名和密码。',
+            style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildShareMetaCard(String label, String value, Color color) {
+    return Container(
+      width: 180,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showShareListenerDialog(
+    BuildContext context,
+    AppProvider provider,
+  ) async {
+    final formKey = GlobalKey<FormState>();
+    final portController = TextEditingController(
+      text: '${provider.shareListenerConfig.port}',
+    );
+    final hostController = TextEditingController(text: '127.0.0.1');
+    var enabled = provider.shareListenerConfig.enabled;
+    var testMessage = '';
+    var testSuccess = false;
+    var testing = false;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setState) => AlertDialog(
+            title: const Text('共享侦听配置'),
+            content: SizedBox(
+              width: 460,
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: enabled,
+                      onChanged: (value) => setState(() => enabled = value),
+                      title: const Text('启用共享侦听'),
+                      subtitle: const Text('开启后会在本机端口接收其他 ShellGuard 请求'),
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: portController,
+                      keyboardType: TextInputType.number,
+                      decoration: AppFieldStyles.outlined(labelText: '侦听端口'),
+                      validator: (value) {
+                        final port = int.tryParse(value?.trim() ?? '');
+                        if (port == null || port < 1 || port > 65535) {
+                          return '请输入有效端口';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: hostController,
+                      decoration: AppFieldStyles.outlined(
+                        labelText: '本地测试地址',
+                        hintText: '例如 127.0.0.1',
+                      ),
+                    ),
+                    if (testMessage.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: testSuccess
+                              ? const Color(0xFFECFDF5)
+                              : const Color(0xFFFEF2F2),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: testSuccess
+                                ? const Color(0xFF86EFAC)
+                                : const Color(0xFFFECACA),
+                          ),
+                        ),
+                        child: Text(
+                          testMessage,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: testSuccess
+                                ? const Color(0xFF166534)
+                                : const Color(0xFF991B1B),
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    const Text(
+                      '当前认证模式固定为“未启用”，后续可在这里扩展 Token 或更完整的权限认证。',
+                      style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                style: AppButtonStyles.text(),
+                child: const Text('取消'),
+              ),
+              ElevatedButton(
+                onPressed: testing
+                    ? null
+                    : () async {
+                        if (!(formKey.currentState?.validate() ?? false)) {
+                          return;
+                        }
+                        setState(() {
+                          testing = true;
+                          testMessage = '';
+                        });
+                        try {
+                          final port = int.parse(portController.text.trim());
+                          final host = hostController.text.trim().isEmpty
+                              ? '127.0.0.1'
+                              : hostController.text.trim();
+                          final success = await provider.testShareEndpoint(
+                            host: host,
+                            port: port,
+                          );
+                          setState(() {
+                            testSuccess = success;
+                            testMessage = success
+                                ? '探活成功：已连通 http://$host:$port/health'
+                                : '探活失败：未收到正常响应';
+                          });
+                        } catch (error) {
+                          setState(() {
+                            testSuccess = false;
+                            testMessage = error.toString();
+                          });
+                        } finally {
+                          setState(() => testing = false);
+                        }
+                      },
+                style: AppButtonStyles.subtle(),
+                child: testing
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('本地探活'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  if (!(formKey.currentState?.validate() ?? false)) {
+                    return;
+                  }
+                  final port = int.parse(portController.text.trim());
+                  final nextConfig = provider.shareListenerConfig.copyWith(
+                    enabled: enabled,
+                    port: port,
+                  );
+                  await provider.updateShareListenerConfig(nextConfig);
+                  if (enabled) {
+                    await provider.restartShareListener(port: port);
+                  } else {
+                    await provider.setShareListenerEnabled(false);
+                  }
+                  if (dialogContext.mounted) {
+                    Navigator.of(dialogContext).pop();
+                  }
+                },
+                style: AppButtonStyles.primary(),
+                child: const Text('保存配置'),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 

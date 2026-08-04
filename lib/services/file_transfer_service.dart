@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../core/ssh_manager.dart';
+import 'share/share_client.dart';
 
 enum FileTransferType {
   uploadFile,
@@ -61,13 +62,35 @@ class FileTransferProgress {
       stage == FileTransferStage.failed;
 }
 
-class FileTransferService {
-  const FileTransferService();
+abstract class FileTransferBackend {
+  Future<bool> remotePathExists(String remotePath);
 
-  Future<bool> remotePathExists(
-    SshManager sshManager,
-    String remotePath,
-  ) async {
+  Future<void> uploadFile(
+    String localFilePath,
+    String remoteFilePath, {
+    void Function(int bytesWritten)? onProgress,
+    TransferCancellationToken? cancelToken,
+  });
+
+  Future<void> downloadFile(
+    String remoteFilePath,
+    String localFilePath, {
+    void Function(int bytesRead)? onProgress,
+    TransferCancellationToken? cancelToken,
+  });
+
+  Future<void> executeCommand(String command);
+
+  Future<int?> statRemoteFileSize(String remotePath);
+}
+
+class SshFileTransferBackend implements FileTransferBackend {
+  final SshManager sshManager;
+
+  const SshFileTransferBackend(this.sshManager);
+
+  @override
+  Future<bool> remotePathExists(String remotePath) async {
     return sshManager.withSftp((sftp) async {
       try {
         await sftp.stat(remotePath);
@@ -78,8 +101,130 @@ class FileTransferService {
     });
   }
 
+  @override
+  Future<void> uploadFile(
+    String localFilePath,
+    String remoteFilePath, {
+    void Function(int bytesWritten)? onProgress,
+    TransferCancellationToken? cancelToken,
+  }) {
+    return sshManager.uploadLocalFile(
+      localFilePath,
+      remoteFilePath,
+      cancelToken: cancelToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<void> downloadFile(
+    String remoteFilePath,
+    String localFilePath, {
+    void Function(int bytesRead)? onProgress,
+    TransferCancellationToken? cancelToken,
+  }) {
+    return sshManager.downloadRemoteFile(
+      remoteFilePath,
+      localFilePath,
+      cancelToken: cancelToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<void> executeCommand(String command) async {
+    await sshManager.executeCommand(command);
+  }
+
+  @override
+  Future<int?> statRemoteFileSize(String remotePath) {
+    return sshManager.statRemoteFileSize(remotePath);
+  }
+}
+
+class ShareFileTransferBackend implements FileTransferBackend {
+  final ShareClient client;
+  final String serverId;
+
+  const ShareFileTransferBackend({
+    required this.client,
+    required this.serverId,
+  });
+
+  @override
+  Future<bool> remotePathExists(String remotePath) async {
+    try {
+      final size = await client.statRemoteFileSize(
+        serverId: serverId,
+        path: remotePath,
+      );
+      return size != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<void> uploadFile(
+    String localFilePath,
+    String remoteFilePath, {
+    void Function(int bytesWritten)? onProgress,
+    TransferCancellationToken? cancelToken,
+  }) {
+    return client.uploadFile(
+      serverId: serverId,
+      remotePath: remoteFilePath,
+      localPath: localFilePath,
+      cancelToken: cancelToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<void> downloadFile(
+    String remoteFilePath,
+    String localFilePath, {
+    void Function(int bytesRead)? onProgress,
+    TransferCancellationToken? cancelToken,
+  }) {
+    return client.downloadFile(
+      serverId: serverId,
+      remotePath: remoteFilePath,
+      localPath: localFilePath,
+      cancelToken: cancelToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<void> executeCommand(String command) async {
+    await client.executeCommand(
+      serverId: serverId,
+      command: command,
+    );
+  }
+
+  @override
+  Future<int?> statRemoteFileSize(String remotePath) {
+    return client.statRemoteFileSize(
+      serverId: serverId,
+      path: remotePath,
+    );
+  }
+}
+
+class FileTransferService {
+  const FileTransferService();
+
+  Future<bool> remotePathExists(
+    FileTransferBackend backend,
+    String remotePath,
+  ) async {
+    return backend.remotePathExists(remotePath);
+  }
+
   Future<void> uploadFile({
-    required SshManager sshManager,
+    required FileTransferBackend backend,
     required String localFilePath,
     required String remoteFilePath,
     void Function(FileTransferProgress progress)? onProgress,
@@ -106,7 +251,7 @@ class FileTransferService {
         ),
       );
 
-      await _ensureRemoteDirectory(sshManager, _remoteDirname(remoteFilePath));
+      await _ensureRemoteDirectory(backend, _remoteDirname(remoteFilePath));
       _throwIfCancelled(cancelToken);
 
       _emit(
@@ -122,7 +267,7 @@ class FileTransferService {
         ),
       );
 
-      await sshManager.uploadLocalFile(
+      await backend.uploadFile(
         localFilePath,
         remoteFilePath,
         cancelToken: cancelToken,
@@ -159,7 +304,7 @@ class FileTransferService {
         ),
       );
     } on TransferCancelledException catch (error) {
-      await _safeDeleteRemoteFile(sshManager, remoteFilePath);
+      await _safeDeleteRemoteFile(backend, remoteFilePath);
       _emitCancelled(
         onProgress,
         FileTransferType.uploadFile,
@@ -183,7 +328,7 @@ class FileTransferService {
   }
 
   Future<void> downloadFile({
-    required SshManager sshManager,
+    required FileTransferBackend backend,
     required String remoteFilePath,
     required String localFilePath,
     void Function(FileTransferProgress progress)? onProgress,
@@ -195,7 +340,7 @@ class FileTransferService {
 
     try {
       _throwIfCancelled(cancelToken);
-      final totalBytes = await sshManager.statRemoteFileSize(remoteFilePath);
+      final totalBytes = await backend.statRemoteFileSize(remoteFilePath);
 
       _emit(
         onProgress,
@@ -210,7 +355,7 @@ class FileTransferService {
         ),
       );
 
-      await sshManager.downloadRemoteFile(
+      await backend.downloadFile(
         remoteFilePath,
         localFilePath,
         cancelToken: cancelToken,
@@ -271,7 +416,7 @@ class FileTransferService {
   }
 
   Future<void> uploadDirectory({
-    required SshManager sshManager,
+    required FileTransferBackend backend,
     required String localDirectoryPath,
     required String remoteDirectoryPath,
     void Function(FileTransferProgress progress)? onProgress,
@@ -320,7 +465,7 @@ class FileTransferService {
         ),
       );
 
-      await sshManager.uploadLocalFile(
+      await backend.uploadFile(
         localArchivePath,
         remoteArchivePath,
         cancelToken: cancelToken,
@@ -359,11 +504,11 @@ class FileTransferService {
       );
 
       await _ensureRemoteDirectory(
-        sshManager,
+        backend,
         _remoteDirname(remoteDirectoryPath),
       );
       _throwIfCancelled(cancelToken);
-      await sshManager.executeCommand(
+      await backend.executeCommand(
         'tar -xzf ${_shellQuote(remoteArchivePath)} -C ${_shellQuote(_remoteDirname(remoteDirectoryPath))}',
       );
       _throwIfCancelled(cancelToken);
@@ -383,7 +528,7 @@ class FileTransferService {
         ),
       );
 
-      await sshManager.executeCommand(
+      await backend.executeCommand(
         'rm -f ${_shellQuote(remoteArchivePath)}',
       );
       _throwIfCancelled(cancelToken);
@@ -406,7 +551,7 @@ class FileTransferService {
       );
     } on TransferCancelledException catch (error) {
       await _safeDeleteDirectory(tempDir);
-      await _safeDeleteRemoteFile(sshManager, remoteArchivePath);
+      await _safeDeleteRemoteFile(backend, remoteArchivePath);
       _emitCancelled(
         onProgress,
         FileTransferType.uploadDirectory,
@@ -419,7 +564,7 @@ class FileTransferService {
       rethrow;
     } catch (error) {
       await _safeDeleteDirectory(tempDir);
-      await _safeDeleteRemoteFile(sshManager, remoteArchivePath);
+      await _safeDeleteRemoteFile(backend, remoteArchivePath);
       _emitFailure(
         onProgress,
         FileTransferType.uploadDirectory,
@@ -434,7 +579,7 @@ class FileTransferService {
   }
 
   Future<void> downloadDirectory({
-    required SshManager sshManager,
+    required FileTransferBackend backend,
     required String remoteDirectoryPath,
     required String localParentDirectory,
     void Function(FileTransferProgress progress)? onProgress,
@@ -468,11 +613,11 @@ class FileTransferService {
         ),
       );
 
-      await sshManager.executeCommand(
+      await backend.executeCommand(
         'tar -czf ${_shellQuote(remoteArchivePath)} -C ${_shellQuote(_remoteDirname(remoteDirectoryPath))} ${_shellQuote(_remoteBasename(remoteDirectoryPath))}',
       );
       _throwIfCancelled(cancelToken);
-      final totalBytes = await sshManager.statRemoteFileSize(remoteArchivePath);
+      final totalBytes = await backend.statRemoteFileSize(remoteArchivePath);
 
       _emit(
         onProgress,
@@ -488,7 +633,7 @@ class FileTransferService {
         ),
       );
 
-      await sshManager.downloadRemoteFile(
+      await backend.downloadFile(
         remoteArchivePath,
         localArchivePath,
         cancelToken: cancelToken,
@@ -544,7 +689,7 @@ class FileTransferService {
         ),
       );
 
-      await _safeDeleteRemoteFile(sshManager, remoteArchivePath);
+      await _safeDeleteRemoteFile(backend, remoteArchivePath);
       await _safeDeleteDirectory(tempDir);
       _throwIfCancelled(cancelToken);
 
@@ -564,7 +709,7 @@ class FileTransferService {
         ),
       );
     } on TransferCancelledException catch (error) {
-      await _safeDeleteRemoteFile(sshManager, remoteArchivePath);
+      await _safeDeleteRemoteFile(backend, remoteArchivePath);
       await _safeDeleteDirectory(tempDir);
       _emitCancelled(
         onProgress,
@@ -577,7 +722,7 @@ class FileTransferService {
       );
       rethrow;
     } catch (error) {
-      await _safeDeleteRemoteFile(sshManager, remoteArchivePath);
+      await _safeDeleteRemoteFile(backend, remoteArchivePath);
       await _safeDeleteDirectory(tempDir);
       _emitFailure(
         onProgress,
@@ -593,10 +738,10 @@ class FileTransferService {
   }
 
   Future<void> _ensureRemoteDirectory(
-    SshManager sshManager,
+    FileTransferBackend backend,
     String remoteDirectoryPath,
   ) async {
-    await sshManager.executeCommand(
+    await backend.executeCommand(
       'mkdir -p ${_shellQuote(remoteDirectoryPath)}',
     );
   }
@@ -641,11 +786,11 @@ class FileTransferService {
   }
 
   Future<void> _safeDeleteRemoteFile(
-    SshManager sshManager,
+    FileTransferBackend backend,
     String remotePath,
   ) async {
     try {
-      await sshManager.executeCommand('rm -f ${_shellQuote(remotePath)}');
+      await backend.executeCommand('rm -f ${_shellQuote(remotePath)}');
     } catch (_) {}
   }
 

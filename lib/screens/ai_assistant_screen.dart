@@ -740,6 +740,10 @@ class _AiAssistantScreenState extends State<AiAssistantScreen> {
   }
 
   Widget _buildEmptyState() {
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    final message = provider.isSharedSelection
+        ? '当前选中的是共享资源，AI 助力会话不会与本地服务器混用。若需要 AI 运维，请在源端直接发起。'
+        : '你可以点击左侧加号创建会话，也可以直接在下方输入需求开始第一轮对话。';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(32),
@@ -748,11 +752,11 @@ class _AiAssistantScreenState extends State<AiAssistantScreen> {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: AppColors.border),
       ),
-      child: const Column(
+      child: Column(
         children: [
-          Icon(Icons.auto_awesome, size: 40, color: AppColors.primary),
-          SizedBox(height: 12),
-          Text(
+          const Icon(Icons.auto_awesome, size: 40, color: AppColors.primary),
+          const SizedBox(height: 12),
+          const Text(
             '开始一个新的 AI 会话',
             style: TextStyle(
               fontSize: 16,
@@ -760,10 +764,10 @@ class _AiAssistantScreenState extends State<AiAssistantScreen> {
               color: AppColors.textPrimary,
             ),
           ),
-          SizedBox(height: 8),
+          const SizedBox(height: 8),
           Text(
-            '你可以点击左侧加号创建会话，也可以直接在下方输入需求开始第一轮对话。',
-            style: TextStyle(fontSize: 13, color: AppColors.textMuted),
+            message,
+            style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
           ),
         ],
       ),

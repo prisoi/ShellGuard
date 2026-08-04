@@ -26,6 +26,18 @@ class ProcessManagementScreenState extends State<ProcessManagementScreen> {
   String? _lastServerId;
   String? _lastUpdatedAt;
 
+  void _showMessage(String message, {bool isError = false}) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? const Color(0xFFDC2626) : null,
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -126,9 +138,7 @@ class ProcessManagementScreenState extends State<ProcessManagementScreen> {
               onPressed: () async {
                 setState(() => _isLoading = true);
                 try {
-                  await provider.sshManager.executePrivilegedCommand(
-                    force ? 'kill -9 $pid' : 'kill $pid',
-                  );
+                  await provider.killProcess(pid, force: force);
                   await provider.requestRefreshNow(
                     RefreshScope.processes,
                     reason: 'processes-kill',
@@ -137,9 +147,15 @@ class ProcessManagementScreenState extends State<ProcessManagementScreen> {
                     return;
                   }
                   _applyCache(provider);
-                } catch (_) {}
-                setState(() => _isLoading = false);
-                navigator.pop();
+                  _showMessage(force ? '已强制终止进程 PID $pid' : '已终止进程 PID $pid');
+                } catch (error) {
+                  _showMessage('终止进程失败：$error', isError: true);
+                } finally {
+                  if (mounted) {
+                    setState(() => _isLoading = false);
+                  }
+                  navigator.pop();
+                }
                 if (_selectedProcess?.pid == pid) {
                   setState(() => _selectedProcess = null);
                 }
@@ -503,18 +519,24 @@ class ProcessManagementScreenState extends State<ProcessManagementScreen> {
                       Expanded(
                         child: Row(
                           children: [
-                            GestureDetector(
-                              onTap: () => _killProcess(process.pid, false),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '终止进程',
+                              onPressed: () => _killProcess(process.pid, false),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.pause,
                                 color: Color(0xFFf59e0b),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () => _killProcess(process.pid, true),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '强制终止进程',
+                              onPressed: () => _killProcess(process.pid, true),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.stop,
                                 color: Color(0xFFef4444),
                                 size: 16,

@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import './providers/app_provider.dart';
+import './core/refresh_scope.dart';
 import './widgets/sidebar.dart';
 import './widgets/top_bar.dart';
 import './screens/dashboard_screen.dart';
@@ -92,11 +95,45 @@ class _MainScreenState extends State<MainScreen> {
   final GlobalKey<MonitoringScreenState> _monitoringKey = GlobalKey();
 
   void _navigateTo(String screen) {
-    Provider.of<AppProvider>(context, listen: false).setCurrentScreen(screen);
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    provider.setCurrentScreen(screen);
     setState(() {
       _currentScreen = screen;
       _visitedScreens.add(screen);
     });
+    unawaited(_handleScreenEnter(provider, screen));
+  }
+
+  Future<void> _handleScreenEnter(AppProvider provider, String screen) async {
+    switch (screen) {
+      case 'dashboard':
+      case 'monitoring':
+        await provider.onPageEnter(RefreshScope.dashboard);
+        break;
+      case 'firewall':
+        await provider.onPageEnter(RefreshScope.firewall);
+        break;
+      case 'ports':
+        await provider.onPageEnter(RefreshScope.ports);
+        break;
+      case 'processes':
+        await provider.onPageEnter(RefreshScope.processes);
+        break;
+      case 'services':
+        await provider.onPageEnter(RefreshScope.services);
+        break;
+      case 'docker':
+        await provider.onPageEnter(RefreshScope.docker);
+        break;
+      case 'files':
+        await provider.onPageEnter(
+          RefreshScope.files,
+          filePath: _filesKey.currentState?.currentPathForRefresh,
+        );
+        break;
+      default:
+        break;
+    }
   }
 
   void _handleRefresh() {
@@ -130,11 +167,13 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _handleConnect() async {
     final provider = Provider.of<AppProvider>(context, listen: false);
+    final connectSelectionId = provider.selectedServer?.id;
     final success = await provider.connectToServer();
     if (!mounted) {
       return;
     }
-    if (!success && provider.errorMessage.isNotEmpty) {
+    final selectionChanged = provider.selectedServer?.id != connectSelectionId;
+    if (!selectionChanged && !success && provider.errorMessage.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(provider.errorMessage),

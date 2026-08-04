@@ -52,7 +52,7 @@ app.*.map.json
 /data/*.db-journal
 /data/*.db-wal
 /data/*.db-shm
-
+pubspec.lock
 
 # Keep the directory structure
 !/data/.gitkeep

@@ -47,7 +47,8 @@ class TopBar extends StatelessWidget {
   }
 
   Widget _buildServerSelector(AppProvider provider, BuildContext context) {
-    if (provider.servers.isEmpty) {
+    final options = provider.serverSelectionOptions;
+    if (options.isEmpty) {
       return SizedBox(
         width: 260,
         child: Container(
@@ -71,38 +72,48 @@ class TopBar extends StatelessWidget {
       backgroundColor: const Color(0xFFf0f4f8),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
-          value: provider.servers.any(
-            (server) => server.id == provider.selectedServer?.id,
-          )
+          value: options.any((item) => item.id == provider.selectedServer?.id)
               ? provider.selectedServer?.id
               : null,
           isExpanded: true,
-          items: provider.servers.map((server) {
+          items: options.map((option) {
             return DropdownMenuItem<String>(
-              value: server.id,
+              value: option.id,
               child: Row(
                 children: [
                   Icon(
-                    server.isOnline ? Icons.check_circle : Icons.circle,
-                    color: server.isOnline
+                    option.isOnline ? Icons.check_circle : Icons.circle,
+                    color: option.isOnline
                         ? const Color(0xFF10b981)
                         : const Color(0xFF6b7c93),
                     size: 12,
                   ),
                   const SizedBox(width: 6),
+                  Icon(
+                    option.isLocal ? Icons.computer_outlined : Icons.hub_outlined,
+                    size: 14,
+                    color: option.isLocal
+                        ? const Color(0xFF2563eb)
+                        : const Color(0xFFd97706),
+                  ),
+                  const SizedBox(width: 6),
                   Text(
-                    server.name,
+                    option.title,
                     style: const TextStyle(
                       fontSize: 12,
                       color: Color(0xFF1a2332),
                     ),
                   ),
                   const SizedBox(width: 6),
-                  Text(
-                    server.ip,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xFF6b7c93),
+                  Expanded(
+                    child: Text(
+                      option.subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF6b7c93),
+                      ),
                     ),
                   ),
                 ],
@@ -111,29 +122,34 @@ class TopBar extends StatelessWidget {
           }).toList(),
           onChanged: (serverId) {
             if (serverId != null) {
-              final match = provider.servers.where((server) => server.id == serverId);
-              if (match.isNotEmpty) {
-                provider.selectServer(match.first);
-              }
+              provider.selectServerById(serverId);
             }
           },
           selectedItemBuilder: (context) {
-            return provider.servers.map((server) {
+            return options.map((option) {
               return Align(
                 alignment: Alignment.centerLeft,
                 child: Row(
                   children: [
                     Icon(
-                      server.isOnline ? Icons.check_circle : Icons.circle,
-                      color: server.isOnline
+                      option.isOnline ? Icons.check_circle : Icons.circle,
+                      color: option.isOnline
                           ? const Color(0xFF10b981)
                           : const Color(0xFF6b7c93),
                       size: 12,
                     ),
                     const SizedBox(width: 6),
+                    Icon(
+                      option.isLocal ? Icons.computer_outlined : Icons.hub_outlined,
+                      size: 14,
+                      color: option.isLocal
+                          ? const Color(0xFF2563eb)
+                          : const Color(0xFFd97706),
+                    ),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        '${server.name} (${server.ip})',
+                        '${option.title} (${option.subtitle})',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(

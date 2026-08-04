@@ -97,7 +97,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
     _scrollToBottom();
 
     try {
-      final result = await provider.sshManager.executeUserCommand(command);
+      final result = await provider.executeSelectedCommand(
+        command,
+        userShell: true,
+      );
       await provider.saveOperationLog(command: command, result: result);
       setState(() {
         if (result.isNotEmpty) {

@@ -28,6 +28,18 @@ class DockerScreenState extends State<DockerScreen> {
   String _imageSortBy = 'created';
   bool _imageSortAscending = false;
 
+  void _showMessage(String message, {bool isError = false}) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? const Color(0xFFDC2626) : null,
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -129,7 +141,7 @@ class DockerScreenState extends State<DockerScreen> {
 
     setState(() => _isLoading = true);
     try {
-      await provider.sshManager.manageContainer(
+      await provider.manageContainerSelected(
         containerId: name,
         action: action,
       );
@@ -138,8 +150,14 @@ class DockerScreenState extends State<DockerScreen> {
         reason: 'docker-manage',
       );
       _syncFromCache();
-    } catch (_) {}
-    setState(() => _isLoading = false);
+      _showMessage('容器 $name 已执行 $action');
+    } catch (error) {
+      _showMessage('容器操作失败：$error', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   Future<void> _removeContainer(String name) async {
@@ -184,14 +202,20 @@ class DockerScreenState extends State<DockerScreen> {
               onPressed: () async {
                 setState(() => _isLoading = true);
                 try {
-                  await provider.sshManager.deleteImage(imageId: imageId);
+                  await provider.deleteImageSelected(imageId: imageId);
                   await provider.requestRefreshNow(
                     RefreshScope.docker,
                     reason: 'docker-delete-image',
                   );
                   _syncFromCache();
-                } catch (_) {}
-                setState(() => _isLoading = false);
+                  _showMessage('镜像已删除');
+                } catch (error) {
+                  _showMessage('删除镜像失败：$error', isError: true);
+                } finally {
+                  if (mounted) {
+                    setState(() => _isLoading = false);
+                  }
+                }
                 navigator.pop();
               },
               style: AppButtonStyles.textDanger(),
@@ -581,39 +605,48 @@ class DockerScreenState extends State<DockerScreen> {
                       Expanded(
                         child: Row(
                           children: [
-                            GestureDetector(
-                              onTap: () =>
-                                  _manageContainer(container.name, 'start'),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '启动容器',
+                              onPressed: () => _manageContainer(container.name, 'start'),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.play_arrow,
                                 color: Color(0xFF10b981),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () =>
-                                  _manageContainer(container.name, 'stop'),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '停止容器',
+                              onPressed: () => _manageContainer(container.name, 'stop'),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.stop,
                                 color: Color(0xFFef4444),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () =>
-                                  _manageContainer(container.name, 'restart'),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '重启容器',
+                              onPressed: () => _manageContainer(container.name, 'restart'),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.refresh,
                                 color: Color(0xFF2563eb),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () => _removeContainer(container.name),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '删除容器',
+                              onPressed: () => _removeContainer(container.name),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.delete,
                                 color: Color(0xFFef4444),
                                 size: 16,
@@ -756,9 +789,12 @@ class DockerScreenState extends State<DockerScreen> {
                         ),
                       ),
                       Expanded(
-                        child: GestureDetector(
-                          onTap: () => _removeImage(image.id),
-                          child: const Icon(
+                        child: IconButton(
+                          tooltip: '删除镜像',
+                          onPressed: () => _removeImage(image.id),
+                          splashRadius: 18,
+                          visualDensity: VisualDensity.compact,
+                          icon: const Icon(
                             Icons.delete,
                             color: Color(0xFFef4444),
                             size: 18,

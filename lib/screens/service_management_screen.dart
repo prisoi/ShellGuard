@@ -24,6 +24,18 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
   String? _lastServerId;
   String? _lastUpdatedAt;
 
+  void _showMessage(String message, {bool isError = false}) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? const Color(0xFFDC2626) : null,
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -105,7 +117,7 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
 
     setState(() => _isLoading = true);
     try {
-      await provider.sshManager.manageService(
+      await provider.manageServiceSelected(
         serviceName: name,
         action: action,
       );
@@ -115,8 +127,14 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
       );
       if (!mounted) return;
       _applyCache(provider);
-    } catch (_) {}
-    setState(() => _isLoading = false);
+      _showMessage('服务 $name 已执行 $action');
+    } catch (error) {
+      _showMessage('服务操作失败：$error', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   Future<void> _showServiceLogs(String name) async {
@@ -130,7 +148,7 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
 
     String logs = '';
     try {
-      logs = await provider.sshManager.getServiceLogs(name);
+      logs = await provider.getServiceLogsSelected(name);
     } catch (e) {
       logs = '获取日志失败: $e';
     }
@@ -244,7 +262,7 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
               Navigator.pop(context);
               setState(() => _isLoading = true);
               try {
-                await provider.sshManager.createManagedService(
+                await provider.createManagedServiceSelected(
                   serviceName: nameController.text.trim(),
                   execStart: execController.text.trim(),
                   workingDirectory: workingDirController.text.trim(),
@@ -258,8 +276,14 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
                 );
                 if (!mounted) return;
                 _applyCache(provider);
-              } catch (_) {}
-              setState(() => _isLoading = false);
+                _showMessage('托管服务已创建并启用');
+              } catch (error) {
+                _showMessage('创建托管服务失败：$error', isError: true);
+              } finally {
+                if (mounted) {
+                  setState(() => _isLoading = false);
+                }
+              }
             },
             style: AppButtonStyles.primary(),
             child: const Text('创建并启用'),
@@ -596,51 +620,63 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
                       Expanded(
                         child: Row(
                           children: [
-                            GestureDetector(
-                              onTap: () =>
-                                  _manageService(service.name, 'start'),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '启动服务',
+                              onPressed: () => _manageService(service.name, 'start'),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.play_arrow,
                                 color: Color(0xFF10b981),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () => _manageService(service.name, 'stop'),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '停止服务',
+                              onPressed: () => _manageService(service.name, 'stop'),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.stop,
                                 color: Color(0xFFef4444),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () =>
-                                  _manageService(service.name, 'restart'),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '重启服务',
+                              onPressed: () => _manageService(service.name, 'restart'),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.refresh,
                                 color: Color(0xFF2563eb),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () =>
-                                  _manageService(service.name, 'reload'),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '重载服务',
+                              onPressed: () => _manageService(service.name, 'reload'),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.sync,
                                 color: Color(0xFFf59e0b),
                                 size: 16,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () => _manageService(
+                            IconButton(
+                              tooltip: service.isEnabled ? '关闭开机自启' : '开启开机自启',
+                              onPressed: () => _manageService(
                                 service.name,
                                 service.isEnabled ? 'disable' : 'enable',
                               ),
-                              child: Icon(
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: Icon(
                                 service.isEnabled
                                     ? Icons.toggle_on
                                     : Icons.toggle_off,
@@ -649,9 +685,12 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            GestureDetector(
-                              onTap: () => _showServiceLogs(service.name),
-                              child: const Icon(
+                            IconButton(
+                              tooltip: '查看服务日志',
+                              onPressed: () => _showServiceLogs(service.name),
+                              splashRadius: 18,
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
                                 Icons.article_outlined,
                                 color: Color(0xFF1a2332),
                                 size: 16,

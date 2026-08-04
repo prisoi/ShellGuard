@@ -36,6 +36,8 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
   bool _isBatchCheckingConnectivity = false;
   bool _isExportingConfigs = false;
   bool _isImportingConfigs = false;
+  bool _isExportingSharedGroup = false;
+  bool _isImportingSharedGroup = false;
   String? _bulkActionStatus;
 
   @override
@@ -210,6 +212,13 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
     return 'shellguard_servers_$compact.json';
   }
 
+  String _buildSharedExportFileName() {
+    final now = DateTime.now();
+    final compact =
+        '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}';
+    return 'shellguard_shared_group_$compact.json';
+  }
+
   Future<void> _batchCheckConnectivity() async {
     if (_filteredServers.isEmpty || _isBatchCheckingConnectivity) {
       _showSnackBar('当前没有可检测的服务器');
@@ -372,6 +381,217 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
         setState(() => _isImportingConfigs = false);
       }
     }
+  }
+
+  Future<void> _exportSharedGroup() async {
+    if (_isExportingSharedGroup || _filteredServers.isEmpty) {
+      _showSnackBar('当前没有可分享的服务器', isError: true);
+      return;
+    }
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    final defaultName = _selectedGroup == '全部' ? '共享服务器组' : _selectedGroup;
+    final groupName = await _showNameInputDialog(
+      title: '分享导出',
+      label: '共享组名称',
+      initialValue: defaultName,
+      hintText: '请输入分享后显示的组名',
+    );
+    if (groupName == null || groupName.trim().isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _isExportingSharedGroup = true;
+      _bulkActionStatus = '正在导出共享组 "$groupName"...';
+    });
+
+    try {
+      final saveLocation = await getSaveLocation(
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'JSON', extensions: ['json']),
+        ],
+        initialDirectory: await _resolveDefaultJsonDirectory(),
+        suggestedName: _buildSharedExportFileName(),
+        confirmButtonText: '导出共享组',
+      );
+      if (saveLocation == null) {
+        if (mounted) {
+          setState(() => _bulkActionStatus = '已取消共享组导出');
+        }
+        return;
+      }
+
+      final path = await provider.exportSharedGroupToJson(
+        groupName: groupName.trim(),
+        servers: _filteredServers,
+        targetPath: saveLocation.path,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() => _bulkActionStatus = '共享组已导出到 $path');
+      _showSnackBar(
+        '共享组导出成功，请在 JSON 中手动补充 hostIp 后再发给另一台电脑导入',
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _bulkActionStatus = '共享组导出失败：$error');
+      _showSnackBar('共享组导出失败：$error', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _isExportingSharedGroup = false);
+      }
+    }
+  }
+
+  Future<void> _importSharedGroup() async {
+    if (_isImportingSharedGroup) {
+      return;
+    }
+
+    setState(() {
+      _isImportingSharedGroup = true;
+      _bulkActionStatus = '等待选择共享组 JSON 文件...';
+    });
+
+    try {
+      final provider = Provider.of<AppProvider>(context, listen: false);
+      final file = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'JSON', extensions: ['json']),
+        ],
+        initialDirectory: await _resolveDefaultJsonDirectory(),
+        confirmButtonText: '导入共享组',
+      );
+      if (file == null) {
+        if (mounted) {
+          setState(() => _bulkActionStatus = '已取消共享组导入');
+        }
+        return;
+      }
+
+      final group = await provider.importSharedGroupFromJson(filePath: file.path);
+      if (!mounted) {
+        return;
+      }
+      setState(
+        () => _bulkActionStatus =
+            '共享组已导入：${group.displayName}，共 ${group.servers.length} 台服务器',
+      );
+      _showSnackBar('共享组导入成功：${group.displayName}');
+    } on FormatException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _bulkActionStatus = '共享组导入失败：${error.message}');
+      _showSnackBar('共享组导入失败：${error.message}', isError: true);
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _bulkActionStatus = '共享组导入失败：$error');
+      _showSnackBar('共享组导入失败：$error', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _isImportingSharedGroup = false);
+      }
+    }
+  }
+
+  Future<void> _renameSharedGroup(String groupId, String currentName) async {
+    if (!mounted) {
+      return;
+    }
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    final nextName = await _showNameInputDialog(
+      title: '重命名共享组',
+      label: '显示名称',
+      initialValue: currentName,
+      hintText: '请输入新的共享组名称',
+    );
+    if (nextName == null || nextName.trim().isEmpty || nextName.trim() == currentName) {
+      return;
+    }
+    await provider.renameSharedGroup(
+      groupId: groupId,
+      displayName: nextName.trim(),
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() => _bulkActionStatus = '共享组已重命名为 ${nextName.trim()}');
+    _showSnackBar('共享组已重命名');
+  }
+
+  Future<void> _deleteSharedGroup(String groupId, String currentName) async {
+    if (!mounted) {
+      return;
+    }
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除共享组'),
+        content: Text('确定要删除共享组 "$currentName" 吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: AppButtonStyles.textDanger(),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    await provider.deleteSharedGroup(groupId);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _bulkActionStatus = '已删除共享组 $currentName');
+    _showSnackBar('共享组已删除');
+  }
+
+  Future<String?> _showNameInputDialog({
+    required String title,
+    required String label,
+    required String initialValue,
+    required String hintText,
+  }) {
+    final controller = TextEditingController(text: initialValue);
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: AppFieldStyles.outlined(
+            labelText: label,
+            hintText: hintText,
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            style: AppButtonStyles.primary(),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _showImportResultDialog(ServerConfigImportResult result) {
@@ -1021,6 +1241,30 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
                 const SizedBox(height: 16),
                 const Divider(color: Color(0xFFe2e8f0)),
                 const SizedBox(height: 8),
+                _buildBulkActionTile(
+                  icon: Icons.share_outlined,
+                  title: '分享导出',
+                  description: '导出共享组 JSON，仅包含服务器名称与映射 ID，不暴露真实地址和凭据。',
+                  accentColor: const Color(0xFF0f766e),
+                  backgroundColor: const Color(0xFFecfeff),
+                  onTap: _isExportingSharedGroup ? null : _exportSharedGroup,
+                  isLoading: _isExportingSharedGroup,
+                ),
+                const SizedBox(height: 8),
+                _buildBulkActionTile(
+                  icon: Icons.group_add_outlined,
+                  title: '分享导入',
+                  description: '导入另一台 ShellGuard 分享的共享组，并在顶部服务器列表中直接使用。',
+                  accentColor: const Color(0xFF7c3aed),
+                  backgroundColor: const Color(0xFFf5f3ff),
+                  onTap: _isImportingSharedGroup ? null : _importSharedGroup,
+                  isLoading: _isImportingSharedGroup,
+                ),
+                const SizedBox(height: 16),
+                _buildSharedGroupsSection(provider),
+                const SizedBox(height: 16),
+                const Divider(color: Color(0xFFe2e8f0)),
+                const SizedBox(height: 8),
                 const Text(
                   '提示: 导入仅做追加合并，不会覆盖当前本地配置；完全重复的服务器会跳过，同 IP 冲突会自动加名称后缀便于后续人工整理。',
                   style: TextStyle(fontSize: 11, color: Color(0xFF6b7c93)),
@@ -1108,6 +1352,88 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildSharedGroupsSection(AppProvider provider) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '已导入共享组',
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 10),
+        if (provider.sharedGroups.isEmpty)
+          const Text(
+            '还没有导入共享组。导入后会自动出现在顶部服务器选择器中。',
+            style: TextStyle(fontSize: 11, color: Color(0xFF6b7c93)),
+          )
+        else
+          ...provider.sharedGroups.map((group) {
+            return Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFe2e8f0)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.hub_outlined,
+                    size: 18,
+                    color: Color(0xFF7c3aed),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          group.displayName,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${group.sourceHostIp}:${group.sourcePort} · ${group.servers.length} 台服务器',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF64748b),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '重命名',
+                    onPressed: () => _renameSharedGroup(
+                      group.id,
+                      group.displayName,
+                    ),
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                  ),
+                  IconButton(
+                    tooltip: '删除',
+                    onPressed: () => _deleteSharedGroup(
+                      group.id,
+                      group.displayName,
+                    ),
+                    icon: const Icon(
+                      Icons.delete_outline,
+                      size: 18,
+                      color: Color(0xFFdc2626),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+      ],
     );
   }
 }

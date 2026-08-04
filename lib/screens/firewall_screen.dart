@@ -30,23 +30,8 @@ class FirewallScreenState extends State<FirewallScreen> {
   String? _lastServerId;
   String? _lastUpdatedAt;
 
-  Future<bool> _ensureFirewallSession(AppProvider provider) async {
-    final server = provider.selectedServer;
-    if (server == null) {
-      return false;
-    }
-    if (provider.sshManager.isConnected &&
-        provider.sshManager.currentServer?.id == server.id) {
-      return true;
-    }
-    final success = await provider.sshManager.connect(server);
-    if (!success && mounted) {
-      final message = provider.sshManager.errorMessage ?? 'SSH 连接失败';
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
-    }
-    return success;
+  Future<bool> _ensureFirewallSession(AppProvider provider) {
+    return provider.ensureTerminalConnection();
   }
 
   @override
@@ -147,7 +132,7 @@ class FirewallScreenState extends State<FirewallScreen> {
       if (!ready) {
         return;
       }
-      await provider.sshManager.manageFirewall(
+      await provider.manageFirewallSelected(
         action: enable ? 'enable' : 'disable',
       );
       await provider.requestRefreshNow(
@@ -182,7 +167,7 @@ class FirewallScreenState extends State<FirewallScreen> {
       if (!ready) {
         return;
       }
-      await provider.sshManager.manageFirewall(
+      await provider.manageFirewallSelected(
         action: _selectedAction.toLowerCase(),
         port: port.isEmpty ? null : port,
         protocol: _selectedProtocol.toLowerCase(),
@@ -247,7 +232,7 @@ class FirewallScreenState extends State<FirewallScreen> {
                     return;
                   }
                   try {
-                    await provider.sshManager.manageFirewall(
+                    await provider.manageFirewallSelected(
                       action: 'delete',
                       ruleNumber: rule.id,
                       ruleAction: rule.action,
@@ -258,7 +243,7 @@ class FirewallScreenState extends State<FirewallScreen> {
                       source: rule.source,
                     );
                   } catch (_) {
-                    await provider.sshManager.manageFirewall(
+                    await provider.manageFirewallSelected(
                       action: 'delete',
                       ruleAction: rule.action,
                       port: rule.port,
@@ -321,7 +306,7 @@ class FirewallScreenState extends State<FirewallScreen> {
                   if (!ready) {
                     return;
                   }
-                  await provider.sshManager.manageFirewall(action: 'reset');
+                  await provider.manageFirewallSelected(action: 'reset');
                   await provider.requestRefreshNow(
                     RefreshScope.firewall,
                     reason: 'firewall-reset',

@@ -113,9 +113,7 @@ class PortManagementScreenState extends State<PortManagementScreen> {
               onPressed: () async {
                 setState(() => _isLoading = true);
                 try {
-                  await provider.sshManager.executePrivilegedCommand(
-                    'kill -9 $pid',
-                  );
+                  await provider.killProcess(int.parse(pid), force: true);
                   await provider.requestRefreshNow(
                     RefreshScope.ports,
                     reason: 'ports-kill',

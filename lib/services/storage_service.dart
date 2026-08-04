@@ -7,6 +7,8 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../models/cache_data.dart';
 import '../models/query_options.dart';
 import '../models/server.dart';
+import '../models/share_listener_config.dart';
+import '../models/shared_server_models.dart';
 
 class ServerImportNotice {
   final String name;
@@ -52,7 +54,7 @@ class ServerConfigImportResult {
 
 class StorageService {
   static const String _databaseName = 'shellguard.db';
-  static const int _databaseVersion = 5;
+  static const int _databaseVersion = 6;
   static const String _serversFileName = 'servers.json';
   static const String _cacheFileName = 'cache.json';
   static const String _selectedServerFileName = 'selected_server.json';
@@ -100,6 +102,9 @@ class StorageService {
           }
           if (oldVersion < 5) {
             await _createAiSessionTables(db);
+          }
+          if (oldVersion < 6) {
+            await _createShareTables(db);
           }
         },
       ),
@@ -163,6 +168,7 @@ class StorageService {
     await _createUsageTables(db);
     await _createAiTables(db);
     await _createAiSessionTables(db);
+    await _createShareTables(db);
 
     await db.insert(
       'groups_table',
@@ -186,6 +192,38 @@ class StorageService {
         server_id TEXT PRIMARY KEY,
         docker_installed INTEGER,
         last_checked TEXT NOT NULL
+      )
+    ''');
+  }
+
+  Future<void> _createShareTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS share_listener_config (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        enabled INTEGER NOT NULL DEFAULT 0,
+        port INTEGER NOT NULL DEFAULT 8848,
+        auth_mode TEXT NOT NULL DEFAULT 'none',
+        token_hint TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS shared_groups (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        source_host_ip TEXT NOT NULL,
+        source_port INTEGER NOT NULL,
+        source_group_name TEXT NOT NULL,
+        imported_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS shared_servers (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        remote_server_id TEXT NOT NULL,
+        display_name TEXT NOT NULL
       )
     ''');
   }
@@ -622,6 +660,240 @@ class StorageService {
       {'key': _selectedServerKey, 'value': serverId},
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<ShareListenerConfig> loadShareListenerConfig() async {
+    try {
+      final db = await _db;
+      final rows = await db.query(
+        'share_listener_config',
+        where: 'singleton_id = 1',
+        limit: 1,
+      );
+      if (rows.isEmpty) {
+        return const ShareListenerConfig();
+      }
+      final row = rows.first;
+      return ShareListenerConfig(
+        enabled: ((row['enabled'] as int?) ?? 0) == 1,
+        port: (row['port'] as int?) ?? 8848,
+        authMode: _parseShareAuthMode(row['auth_mode']?.toString()),
+        tokenHint: row['token_hint'] as String?,
+      );
+    } catch (_) {
+      return const ShareListenerConfig();
+    }
+  }
+
+  Future<void> saveShareListenerConfig(ShareListenerConfig config) async {
+    final db = await _db;
+    await db.insert(
+      'share_listener_config',
+      {
+        'singleton_id': 1,
+        'enabled': config.enabled ? 1 : 0,
+        'port': config.port,
+        'auth_mode': config.authMode.name,
+        'token_hint': config.tokenHint,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Map<String, Object?> buildSharedGroupExportJson({
+    required String groupName,
+    required int port,
+    required List<Server> servers,
+  }) {
+    final payload = SharedGroupExportPayload(
+      groupName: groupName,
+      hostIp: '',
+      port: port,
+      servers: servers
+          .map(
+            (server) => SharedExportServer(
+              serverId: server.id,
+              serverName: server.name,
+            ),
+          )
+          .toList(),
+    );
+    return payload.toJson();
+  }
+
+  Future<String> exportSharedGroupToJson({
+    required String groupName,
+    required int port,
+    required List<Server> servers,
+    required String targetPath,
+  }) async {
+    final file = File(targetPath);
+    await file.parent.create(recursive: true);
+    final payload = buildSharedGroupExportJson(
+      groupName: groupName,
+      port: port,
+      servers: servers,
+    );
+    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(payload));
+    return file.path;
+  }
+
+  Future<SharedGroupRecord> importSharedGroupFromJson({
+    required String filePath,
+    String? displayNameOverride,
+  }) async {
+    final file = File(filePath);
+    if (!await file.exists()) {
+      throw const FormatException('导入文件不存在');
+    }
+    final decoded = json.decode(await file.readAsString());
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('共享 JSON 格式不正确');
+    }
+    final schema = decoded['schema']?.toString();
+    if (schema != 'shellguard_shared_group') {
+      throw const FormatException('不是可识别的共享服务器组文件');
+    }
+    final payload = SharedGroupExportPayload.fromJson(decoded.cast<String, Object?>());
+    if (payload.servers.isEmpty) {
+      throw const FormatException('共享服务器组中没有任何服务器');
+    }
+    if (payload.hostIp.trim().isEmpty) {
+      throw const FormatException('共享文件中的主机 IP 为空，请先手动补充 hostIp');
+    }
+
+    final existing = await loadImportedSharedGroups();
+    final displayName = (displayNameOverride == null || displayNameOverride.trim().isEmpty)
+        ? payload.groupName
+        : displayNameOverride.trim();
+    final existingNames = existing.map((item) => item.displayName).toSet();
+    final finalDisplayName = _dedupeSharedGroupDisplayName(
+      preferredName: displayName,
+      existingNames: existingNames,
+    );
+    final groupId = 'shared_group_${DateTime.now().microsecondsSinceEpoch}';
+    final group = SharedGroupRecord(
+      id: groupId,
+      displayName: finalDisplayName,
+      sourceHostIp: payload.hostIp.trim(),
+      sourcePort: payload.port,
+      sourceGroupName: payload.groupName,
+      importedAt: DateTime.now(),
+      servers: payload.servers
+          .map(
+            (item) => SharedServerRecord(
+              id: 'shared_server_${groupId}_${item.serverId}',
+              groupId: groupId,
+              remoteServerId: item.serverId,
+              displayName: item.serverName,
+            ),
+          )
+          .toList(),
+    );
+    await saveImportedSharedGroup(group);
+    return group;
+  }
+
+  Future<void> saveImportedSharedGroup(SharedGroupRecord group) async {
+    final db = await _db;
+    await db.transaction((txn) async {
+      await txn.insert(
+        'shared_groups',
+        {
+          'id': group.id,
+          'display_name': group.displayName,
+          'source_host_ip': group.sourceHostIp,
+          'source_port': group.sourcePort,
+          'source_group_name': group.sourceGroupName,
+          'imported_at': group.importedAt.toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.delete(
+        'shared_servers',
+        where: 'group_id = ?',
+        whereArgs: [group.id],
+      );
+      for (final server in group.servers) {
+        await txn.insert(
+          'shared_servers',
+          {
+            'id': server.id,
+            'group_id': server.groupId,
+            'remote_server_id': server.remoteServerId,
+            'display_name': server.displayName,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+  }
+
+  Future<List<SharedGroupRecord>> loadImportedSharedGroups() async {
+    final db = await _db;
+    final groupRows = await db.query(
+      'shared_groups',
+      orderBy: 'display_name COLLATE NOCASE',
+    );
+    final serverRows = await db.query(
+      'shared_servers',
+      orderBy: 'display_name COLLATE NOCASE',
+    );
+    final serversByGroup = <String, List<SharedServerRecord>>{};
+    for (final row in serverRows) {
+      final record = SharedServerRecord(
+        id: row['id']!.toString(),
+        groupId: row['group_id']!.toString(),
+        remoteServerId: row['remote_server_id']!.toString(),
+        displayName: row['display_name']!.toString(),
+      );
+      serversByGroup.putIfAbsent(record.groupId, () => <SharedServerRecord>[]).add(record);
+    }
+    return groupRows.map((row) {
+      final groupId = row['id']!.toString();
+      return SharedGroupRecord(
+        id: groupId,
+        displayName: row['display_name']!.toString(),
+        sourceHostIp: row['source_host_ip']!.toString(),
+        sourcePort: (row['source_port'] as int?) ?? 8848,
+        sourceGroupName: row['source_group_name']!.toString(),
+        importedAt: DateTime.tryParse(row['imported_at']!.toString()) ?? DateTime.now(),
+        servers: serversByGroup[groupId] ?? const <SharedServerRecord>[],
+      );
+    }).toList();
+  }
+
+  Future<void> renameImportedSharedGroup({
+    required String groupId,
+    required String displayName,
+  }) async {
+    final normalized = displayName.trim();
+    if (normalized.isEmpty) {
+      return;
+    }
+    final db = await _db;
+    await db.update(
+      'shared_groups',
+      {'display_name': normalized},
+      where: 'id = ?',
+      whereArgs: [groupId],
+    );
+  }
+
+  Future<void> deleteImportedSharedGroup(String groupId) async {
+    final db = await _db;
+    await db.transaction((txn) async {
+      await txn.delete(
+        'shared_servers',
+        where: 'group_id = ?',
+        whereArgs: [groupId],
+      );
+      await txn.delete(
+        'shared_groups',
+        where: 'id = ?',
+        whereArgs: [groupId],
+      );
+    });
   }
 
   Future<List<String>> loadGroups() async {
@@ -1627,6 +1899,32 @@ class StorageService {
     while (existingNames.contains(candidate)) {
       candidate = '$normalizedBase (导入:$safeIp-$index)';
       index++;
+    }
+    return candidate;
+  }
+
+  ShareAuthMode _parseShareAuthMode(String? raw) {
+    for (final mode in ShareAuthMode.values) {
+      if (mode.name == raw) {
+        return mode;
+      }
+    }
+    return ShareAuthMode.none;
+  }
+
+  String _dedupeSharedGroupDisplayName({
+    required String preferredName,
+    required Set<String> existingNames,
+  }) {
+    final base = preferredName.trim().isEmpty ? '共享服务器组' : preferredName.trim();
+    if (!existingNames.contains(base)) {
+      return base;
+    }
+    var index = 2;
+    var candidate = '$base ($index)';
+    while (existingNames.contains(candidate)) {
+      index++;
+      candidate = '$base ($index)';
     }
     return candidate;
   }

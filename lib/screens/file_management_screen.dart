@@ -45,6 +45,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
 
   bool get _hasActiveTransfer =>
       _transferProgress != null && !_transferProgress!.isFinished;
+  String get currentPathForRefresh => _currentPath;
 
   @override
   void initState() {
@@ -157,22 +158,29 @@ class FileManagementScreenState extends State<FileManagementScreen> {
   }
 
   Future<bool> _ensureFileSession(AppProvider provider) async {
-    final server = provider.selectedServer;
-    if (server == null) {
+    if (provider.selectedServer == null) {
       return false;
     }
-    if (provider.sshManager.isConnected &&
-        provider.sshManager.currentServer?.id == server.id) {
-      return true;
-    }
-    final success = await provider.sshManager.connect(server);
+    final success = await provider.ensureTerminalConnection();
     if (!success && mounted) {
-      final message = provider.sshManager.errorMessage ?? 'SSH 连接失败';
+      final message = provider.errorMessage.isEmpty
+          ? '连接失败'
+          : provider.errorMessage;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
     }
     return success;
+  }
+
+  FileTransferBackend _currentTransferBackend(AppProvider provider) {
+    if (provider.isSharedSelection) {
+      return ShareFileTransferBackend(
+        client: provider.currentShareClient!,
+        serverId: provider.selectedSharedServer!.remoteServerId,
+      );
+    }
+    return SshFileTransferBackend(provider.sshManager);
   }
 
   void refresh() {
@@ -219,7 +227,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       if (!ready) {
         return;
       }
-      final resolution = await provider.sshManager.resolveDirectory(
+      final resolution = await provider.resolveSelectedDirectory(
         requestedPath,
         fallbackToParent: allowFallback,
       );
@@ -315,7 +323,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
         if (!ready) {
           return;
         }
-        await provider.sshManager.createDirectory(_buildPath(name));
+        await provider.createDirectorySelected(_buildPath(name));
         await provider.requestRefreshNow(
           RefreshScope.files,
           reason: 'files-create-directory',
@@ -350,7 +358,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
         if (!ready) {
           return;
         }
-        await provider.sshManager.writeFile(_buildPath(name), '');
+        await provider.writeFileSelected(_buildPath(name), '');
         await provider.requestRefreshNow(
           RefreshScope.files,
           reason: 'files-create-file',
@@ -391,7 +399,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
                   if (!ready) {
                     return;
                   }
-                  await provider.sshManager.deleteFile(file.path);
+                  await provider.deleteFileSelected(file.path);
                   await provider.requestRefreshNow(
                     RefreshScope.files,
                     reason: 'files-delete',
@@ -444,7 +452,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       if (!ready) {
         return;
       }
-      await provider.sshManager.renameFile(
+      await provider.renameFileSelected(
         file.path,
         _buildPath(newName.trim()),
       );
@@ -487,7 +495,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       if (!ready) {
         return;
       }
-      await provider.sshManager.executeCommand(
+      await provider.executeSelectedCommand(
         'chmod ${permission.trim()} "${file.path}"',
       );
       await provider.requestRefreshNow(
@@ -528,11 +536,12 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       return;
     }
 
+    final backend = _currentTransferBackend(provider);
     final cancelToken = TransferCancellationToken();
     await _runTransfer(
       cancelToken: cancelToken,
       operation: () => _fileTransferService.uploadFile(
-        sshManager: provider.sshManager,
+        backend: backend,
         localFilePath: localFilePath,
         remoteFilePath: remoteFilePath,
         cancelToken: cancelToken,
@@ -565,11 +574,12 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       return;
     }
 
+    final backend = _currentTransferBackend(provider);
     final cancelToken = TransferCancellationToken();
     await _runTransfer(
       cancelToken: cancelToken,
       operation: () => _fileTransferService.uploadDirectory(
-        sshManager: provider.sshManager,
+        backend: backend,
         localDirectoryPath: localDirectoryPath,
         remoteDirectoryPath: remoteDirectoryPath,
         cancelToken: cancelToken,
@@ -614,11 +624,12 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       return;
     }
 
+    final backend = _currentTransferBackend(provider);
     final cancelToken = TransferCancellationToken();
     await _runTransfer(
       cancelToken: cancelToken,
       operation: () => _fileTransferService.downloadFile(
-        sshManager: provider.sshManager,
+        backend: backend,
         remoteFilePath: file.path,
         localFilePath: localFilePath,
         cancelToken: cancelToken,
@@ -657,11 +668,12 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       return;
     }
 
+    final backend = _currentTransferBackend(provider);
     final cancelToken = TransferCancellationToken();
     await _runTransfer(
       cancelToken: cancelToken,
       operation: () => _fileTransferService.downloadDirectory(
-        sshManager: provider.sshManager,
+        backend: backend,
         remoteDirectoryPath: file.path,
         localParentDirectory: localParentDirectory,
         cancelToken: cancelToken,
@@ -771,8 +783,9 @@ class FileManagementScreenState extends State<FileManagementScreen> {
     required String label,
   }) async {
     final provider = Provider.of<AppProvider>(context, listen: false);
+    final backend = _currentTransferBackend(provider);
     final exists = await _fileTransferService.remotePathExists(
-      provider.sshManager,
+      backend,
       remotePath,
     );
     if (!exists) {
@@ -785,7 +798,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
     if (!confirmed) {
       return false;
     }
-    await provider.sshManager.deleteFile(remotePath);
+    await provider.deleteFileSelected(remotePath);
     return true;
   }
 
