@@ -54,7 +54,7 @@ class ServerConfigImportResult {
 
 class StorageService {
   static const String _databaseName = 'shellguard.db';
-  static const int _databaseVersion = 6;
+  static const int _databaseVersion = 7;
   static const String _serversFileName = 'servers.json';
   static const String _cacheFileName = 'cache.json';
   static const String _selectedServerFileName = 'selected_server.json';
@@ -106,6 +106,9 @@ class StorageService {
           if (oldVersion < 6) {
             await _createShareTables(db);
           }
+          if (oldVersion < 7) {
+            await _upgradeServersTableV7(db);
+          }
         },
       ),
     );
@@ -128,6 +131,13 @@ class StorageService {
         tags_json TEXT NOT NULL,
         is_online INTEGER NOT NULL DEFAULT 0,
         os_info TEXT,
+        os_id TEXT,
+        os_name TEXT,
+        os_version TEXT,
+        os_family TEXT,
+        package_manager TEXT,
+        service_manager TEXT,
+        firewall_backend TEXT,
         kernel_version TEXT,
         uptime TEXT
       )
@@ -194,6 +204,23 @@ class StorageService {
         last_checked TEXT NOT NULL
       )
     ''');
+  }
+
+  Future<void> _upgradeServersTableV7(DatabaseExecutor db) async {
+    final statements = <String>[
+      'ALTER TABLE servers ADD COLUMN os_id TEXT',
+      'ALTER TABLE servers ADD COLUMN os_name TEXT',
+      'ALTER TABLE servers ADD COLUMN os_version TEXT',
+      'ALTER TABLE servers ADD COLUMN os_family TEXT',
+      'ALTER TABLE servers ADD COLUMN package_manager TEXT',
+      'ALTER TABLE servers ADD COLUMN service_manager TEXT',
+      'ALTER TABLE servers ADD COLUMN firewall_backend TEXT',
+    ];
+    for (final statement in statements) {
+      try {
+        await db.execute(statement);
+      } catch (_) {}
+    }
   }
 
   Future<void> _createShareTables(DatabaseExecutor db) async {
@@ -421,10 +448,11 @@ class StorageService {
 
   Future<void> saveServers(List<Server> servers) async {
     final db = await _db;
+    final uniqueServers = _dedupeServersForPersistence(servers);
     await db.transaction((txn) async {
       await txn.delete('servers');
       final groupNames = <String>{_defaultGroup};
-      for (final server in servers) {
+      for (final server in uniqueServers) {
         await txn.insert(
           'servers',
           _serverToRow(server),
@@ -738,9 +766,8 @@ class StorageService {
     return file.path;
   }
 
-  Future<SharedGroupRecord> importSharedGroupFromJson({
+  Future<SharedGroupExportPayload> readSharedGroupImportPayload({
     required String filePath,
-    String? displayNameOverride,
   }) async {
     final file = File(filePath);
     if (!await file.exists()) {
@@ -761,6 +788,14 @@ class StorageService {
     if (payload.hostIp.trim().isEmpty) {
       throw const FormatException('共享文件中的主机 IP 为空，请先手动补充 hostIp');
     }
+    return payload;
+  }
+
+  Future<SharedGroupRecord> importSharedGroupFromJson({
+    required String filePath,
+    String? displayNameOverride,
+  }) async {
+    final payload = await readSharedGroupImportPayload(filePath: filePath);
 
     final existing = await loadImportedSharedGroups();
     final displayName = (displayNameOverride == null || displayNameOverride.trim().isEmpty)
@@ -1933,6 +1968,24 @@ class StorageService {
     return 'import_${DateTime.now().microsecondsSinceEpoch}_$sequence';
   }
 
+  List<Server> _dedupeServersForPersistence(List<Server> servers) {
+    final result = <Server>[];
+    final seenKeys = <String>{};
+    for (final server in servers) {
+      final key = _serverSaveIdentityKey(server);
+      if (seenKeys.contains(key)) {
+        continue;
+      }
+      seenKeys.add(key);
+      result.add(server);
+    }
+    return result;
+  }
+
+  String _serverSaveIdentityKey(Server server) {
+    return '${_normalizeIp(server.ip)}|${server.username.trim().toLowerCase()}';
+  }
+
   Map<String, Object?> _serverToRow(Server server) {
     return {
       'id': server.id,
@@ -1946,6 +1999,13 @@ class StorageService {
       'tags_json': json.encode(server.tags),
       'is_online': server.isOnline ? 1 : 0,
       'os_info': server.osInfo,
+      'os_id': server.osId,
+      'os_name': server.osName,
+      'os_version': server.osVersion,
+      'os_family': server.osFamily,
+      'package_manager': server.packageManager,
+      'service_manager': server.serviceManager,
+      'firewall_backend': server.firewallBackend,
       'kernel_version': server.kernelVersion,
       'uptime': server.uptime,
     };
@@ -1966,6 +2026,13 @@ class StorageService {
       ),
       isOnline: ((row['is_online'] as int?) ?? 0) == 1,
       osInfo: row['os_info'] as String?,
+      osId: row['os_id'] as String?,
+      osName: row['os_name'] as String?,
+      osVersion: row['os_version'] as String?,
+      osFamily: row['os_family'] as String?,
+      packageManager: row['package_manager'] as String?,
+      serviceManager: row['service_manager'] as String?,
+      firewallBackend: row['firewall_backend'] as String?,
       kernelVersion: row['kernel_version'] as String?,
       uptime: row['uptime'] as String?,
     );

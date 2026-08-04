@@ -71,6 +71,7 @@ class LlmService {
       '优先先做检查，再做可能有副作用的操作。'
       '如果用户只是查询信息，尽量只输出只读命令，例如 docker ps、docker inspect、df、free、ps、systemctl status、journalctl、cat、grep。'
       '除非用户明确要求修改系统，否则不要生成 rm、reboot、shutdown、systemctl restart、iptables、ufw reset 等命令。'
+      '你必须严格根据当前服务器的发行版和能力画像生成命令，例如 Debian/Ubuntu 优先 apt，RHEL/CentOS/Rocky/AlmaLinux 优先 yum/dnf，firewalld 服务器不要生成 ufw 命令。'
       '如果需要获取某个问题的答案，先生成检查命令，再根据检查结果决定后续步骤。'
       '请只返回 JSON，不要返回 Markdown，不要使用代码块。'
       'JSON 结构必须为 {"analysis":"...","steps":[{"title":"...","command":"...","summary":"...","risk":"safe|low|medium|high"}]}。'
@@ -100,7 +101,7 @@ class LlmService {
           {
             'role': 'user',
             'content':
-                '服务器信息: ${server.name} (${server.ip}), 用户=${server.username}。\n'
+                '${_buildServerContext(server)}\n'
                 '用户需求: $userPrompt\n'
                 '请你为 SSH 技能输出执行计划。\n'
                 '要求：\n'
@@ -158,7 +159,7 @@ class LlmService {
           {
             'role': 'user',
             'content':
-                '服务器信息: ${server.name} (${server.ip}), 用户=${server.username}。\n'
+                '${_buildServerContext(server)}\n'
                 '会话摘要: ${sessionSummary.isEmpty ? '无' : sessionSummary}\n'
                 '此前会话历史:\n${conversationHistory.isEmpty ? '无' : conversationHistory}\n'
                 '原始用户需求: $userPrompt\n'
@@ -210,7 +211,7 @@ class LlmService {
           {
             'role': 'user',
             'content':
-                '服务器信息: ${server.name} (${server.ip}), 用户=${server.username}\n'
+                '${_buildServerContext(server)}\n'
                 '请压缩下面的历史会话，保留：已确认的事实、已经执行过的命令及其关键结果、用户偏好、尚未完成的目标、风险点。\n'
                 '不要保留冗余措辞，输出纯文本摘要。\n'
                 '历史会话如下:\n$content',
@@ -361,6 +362,16 @@ class LlmService {
       default:
         return AiRiskLevel.safe;
     }
+  }
+
+  static String _buildServerContext(Server server) {
+    return '服务器信息: ${server.name} (${server.ip}), 用户=${server.username}。\n'
+        '操作系统: ${server.osDisplayLabel}\n'
+        '系统族: ${(server.osFamily?.trim().isEmpty ?? true) ? 'unknown' : server.osFamily}\n'
+        '包管理器: ${(server.packageManager?.trim().isEmpty ?? true) ? 'unknown' : server.packageManager}\n'
+        '服务管理器: ${(server.serviceManager?.trim().isEmpty ?? true) ? 'unknown' : server.serviceManager}\n'
+        '防火墙后端: ${(server.firewallBackend?.trim().isEmpty ?? true) ? 'unknown' : server.firewallBackend}\n'
+        '内核: ${(server.kernelVersion?.trim().isEmpty ?? true) ? 'unknown' : server.kernelVersion}';
   }
 
   List<LlmPlannedStep> _parseSteps(List<dynamic>? rawSteps) {

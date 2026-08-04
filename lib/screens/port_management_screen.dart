@@ -189,7 +189,14 @@ class PortManagementScreenState extends State<PortManagementScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
           ),
           child: _isLoading
-              ? const CircularProgressIndicator(color: Colors.white)
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                )
               : const Text('刷新端口列表'),
         ),
       ],
@@ -343,12 +350,16 @@ class PortManagementScreenState extends State<PortManagementScreen> {
                       ),
                       Expanded(
                         child: port.pid.isNotEmpty
-                            ? GestureDetector(
-                                onTap: () => _killProcess(port.pid),
-                                child: const Icon(
-                                  Icons.stop,
-                                  color: Color(0xFFef4444),
-                                  size: 18,
+                            ? Align(
+                                alignment: Alignment.centerLeft,
+                                child: AppIconActionButton(
+                                  icon: Icons.stop,
+                                  tooltip: '终止关联进程',
+                                  onPressed: _isLoading
+                                      ? null
+                                      : () => _killProcess(port.pid),
+                                  foregroundColor: const Color(0xFFef4444),
+                                  backgroundColor: const Color(0xFFfef2f2),
                                 ),
                               )
                             : const SizedBox(),

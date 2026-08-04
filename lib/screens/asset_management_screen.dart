@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
@@ -38,6 +39,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
   bool _isImportingConfigs = false;
   bool _isExportingSharedGroup = false;
   bool _isImportingSharedGroup = false;
+  bool _isSavingServer = false;
   String? _bulkActionStatus;
 
   @override
@@ -80,6 +82,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
     _usernameController.clear();
     _passwordController.clear();
     _serverGroup = '默认分组';
+    _isSavingServer = false;
 
     showDialog(
       context: context,
@@ -88,13 +91,19 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
         content: _buildServerForm(),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: _isSavingServer ? null : () => Navigator.pop(context),
             child: const Text('取消'),
           ),
           TextButton(
-            onPressed: _saveServer,
+            onPressed: _isSavingServer ? null : _saveServer,
             style: AppButtonStyles.primary(),
-            child: const Text('保存'),
+            child: _isSavingServer
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('保存'),
           ),
         ],
       ),
@@ -109,6 +118,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
     _usernameController.text = server.username;
     _passwordController.text = server.password;
     _serverGroup = server.group;
+    _isSavingServer = false;
 
     showDialog(
       context: context,
@@ -117,17 +127,30 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
         content: _buildServerForm(),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: _isSavingServer ? null : () => Navigator.pop(context),
             child: const Text('取消'),
           ),
-          TextButton(onPressed: _saveServer, child: const Text('保存')),
+          TextButton(
+            onPressed: _isSavingServer ? null : () async => _saveServer(),
+            child: _isSavingServer
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('保存'),
+          ),
         ],
       ),
     );
   }
 
-  void _saveServer() {
-    if (!_formKey.currentState!.validate()) return;
+  Future<void> _saveServer() async {
+    if (_isSavingServer || !_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _isSavingServer = true;
+    });
 
     final provider = Provider.of<AppProvider>(context, listen: false);
     final server = Server(
@@ -142,14 +165,32 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
       group: _serverGroup,
     );
 
-    if (_editingServer != null) {
-      provider.updateServer(server);
-    } else {
-      provider.addServer(server);
-    }
+    try {
+      if (_editingServer != null) {
+        await provider.updateServer(server);
+      } else {
+        await provider.addServer(server);
+      }
 
-    Navigator.pop(context);
-    _reloadServers();
+      if (!mounted) {
+        return;
+      }
+      Navigator.pop(context);
+      unawaited(_reloadServers());
+    } catch (error) {
+      if (mounted) {
+        _showSnackBar(
+          error.toString().replaceFirst('Exception: ', ''),
+          isError: true,
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSavingServer = false;
+        });
+      }
+    }
   }
 
   void _deleteServer(String serverId) {
@@ -178,6 +219,137 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _createGroup(AppProvider provider) async {
+    final controller = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('新建分组'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: '分组名称'),
+          autofocus: true,
+          onSubmitted: (_) => Navigator.pop(context, true),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    final value = controller.text.trim();
+    if (confirmed != true || value.isEmpty) {
+      return;
+    }
+    await provider.addGroup(value);
+    if (!mounted) {
+      return;
+    }
+    _showSnackBar('已创建分组：$value');
+  }
+
+  Future<void> _renameGroup(AppProvider provider, String currentName) async {
+    final controller = TextEditingController(text: currentName);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重命名分组'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: '新的分组名称'),
+          autofocus: true,
+          onSubmitted: (_) => Navigator.pop(context, true),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    final value = controller.text.trim();
+    if (confirmed != true || value.isEmpty || value == currentName) {
+      return;
+    }
+    try {
+      await provider.renameGroup(oldName: currentName, newName: value);
+      if (!mounted) {
+        return;
+      }
+      if (_selectedGroup == currentName) {
+        setState(() {
+          _selectedGroup = value;
+        });
+      }
+      await _reloadServers();
+      _showSnackBar('分组已重命名为：$value');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showSnackBar(
+        error.toString().replaceFirst('Exception: ', ''),
+        isError: true,
+      );
+    }
+  }
+
+  Future<void> _deleteGroup(AppProvider provider, String groupName) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除分组'),
+        content: Text('删除 "$groupName" 后，分组内服务器会自动回到默认分组，是否继续？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: AppButtonStyles.textDanger(),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    try {
+      await provider.deleteGroup(groupName);
+      if (!mounted) {
+        return;
+      }
+      if (_selectedGroup == groupName) {
+        setState(() {
+          _selectedGroup = '默认分组';
+        });
+      }
+      await _reloadServers();
+      _showSnackBar('分组已删除，服务器已回到默认分组');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showSnackBar(
+        error.toString().replaceFirst('Exception: ', ''),
+        isError: true,
+      );
+    }
   }
 
   void _showSnackBar(String message, {bool isError = false}) {
@@ -348,8 +520,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
         return;
       }
 
-      final remainingSlots =
-          AppProvider.freeServerLimit - provider.servers.length;
+      final remainingSlots = provider.remainingServerQuota;
       final result = await provider.storageService.importServersFromJson(
         filePath: file.path,
         maxAdditionalServers: remainingSlots < 0 ? 0 : remainingSlots,
@@ -892,129 +1063,136 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
           mainAxisSpacing: 16,
           childAspectRatio: crossAxisCount == 1 ? 2.8 : 2.25,
           children: _filteredServers.map((server) {
-            return Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFFe2e8f0)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        server.isOnline ? Icons.check_circle : Icons.circle,
-                        color: server.isOnline
-                            ? const Color(0xFF10b981)
-                            : const Color(0xFFef4444),
-                        size: 12,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          server.name,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: server.group == '生产环境'
-                              ? const Color(0xFFeff6ff)
-                              : server.group == '测试环境'
-                              ? const Color(0xFFfffbeb)
-                              : const Color(0xFFfef2f2),
-                          borderRadius: BorderRadius.circular(9),
-                        ),
-                        child: Text(
-                          server.group,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: server.group == '生产环境'
-                                ? const Color(0xFF2563eb)
-                                : server.group == '测试环境'
-                                ? const Color(0xFFf59e0b)
-                                : const Color(0xFFef4444),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '${server.ip}:${server.port}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF6b7c93),
-                      fontFamily: 'Monospace',
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    server.osInfo ?? '未知系统',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xFF6b7c93),
-                    ),
-                  ),
-                  const Spacer(),
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
+            return GestureDetector(
+              onDoubleTap: () {
+                unawaited(
+                  Provider.of<AppProvider>(context, listen: false).selectServer(server),
+                );
+                if (!mounted) {
+                  return;
+                }
+                _showSnackBar('已选中服务器：${server.name}');
+              },
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFe2e8f0)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          server.isOnline ? Icons.check_circle : Icons.circle,
                           color: server.isOnline
-                              ? const Color(0xFFecfdf5)
-                              : const Color(0xFFfef2f2),
-                          borderRadius: BorderRadius.circular(8),
+                              ? const Color(0xFF10b981)
+                              : const Color(0xFFef4444),
+                          size: 12,
                         ),
-                        child: Text(
-                          server.isOnline ? '在线' : '离线',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: server.isOnline
-                                ? const Color(0xFF10b981)
-                                : const Color(0xFFef4444),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            server.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                         ),
-                      ),
-                      const Spacer(),
-                      GestureDetector(
-                        onTap: () => _showEditServerDialog(server),
-                        child: const Icon(
-                          Icons.edit,
-                          color: Color(0xFF6b7c93),
-                          size: 18,
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: server.group == '生产环境'
+                                ? const Color(0xFFeff6ff)
+                                : server.group == '测试环境'
+                                ? const Color(0xFFfffbeb)
+                                : const Color(0xFFfef2f2),
+                            borderRadius: BorderRadius.circular(9),
+                          ),
+                          child: Text(
+                            server.group,
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: server.group == '生产环境'
+                                  ? const Color(0xFF2563eb)
+                                  : server.group == '测试环境'
+                                  ? const Color(0xFFf59e0b)
+                                  : const Color(0xFFef4444),
+                            ),
+                          ),
                         ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${server.ip}:${server.port}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF6b7c93),
+                        fontFamily: 'Monospace',
                       ),
-                      const SizedBox(width: 8),
-                      GestureDetector(
-                        onTap: () => _deleteServer(server.id),
-                        child: const Icon(
-                          Icons.delete,
-                          color: Color(0xFFef4444),
-                          size: 18,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      server.osDisplayLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF6b7c93),
+                      ),
+                    ),
+                    const Spacer(),
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: server.isOnline
+                                ? const Color(0xFFecfdf5)
+                                : const Color(0xFFfef2f2),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            server.isOnline ? '在线' : '离线',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: server.isOnline
+                                  ? const Color(0xFF10b981)
+                                  : const Color(0xFFef4444),
+                            ),
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                ],
+                        const Spacer(),
+                        AppIconActionButton(
+                          icon: Icons.edit_outlined,
+                          tooltip: '编辑服务器',
+                          onPressed: () => _showEditServerDialog(server),
+                        ),
+                        const SizedBox(width: 8),
+                        AppIconActionButton(
+                          icon: Icons.delete_outline,
+                          tooltip: '删除服务器',
+                          onPressed: () => _deleteServer(server.id),
+                          foregroundColor: const Color(0xFFef4444),
+                          backgroundColor: const Color(0xFFfef2f2),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             );
           }).toList(),
@@ -1024,8 +1202,8 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
   }
 
   Widget _buildServerQuota(AppProvider provider) {
-    final used = provider.servers.length;
-    final total = 10;
+    final used = provider.totalManagedServerCount;
+    final total = AppProvider.freeServerLimit;
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -1058,7 +1236,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
           ),
           const SizedBox(width: 16),
           Text(
-            '（个人免费版最多 10 台服务器）',
+            '（个人免费版最多 10 台总资源，含共享导入 ${provider.importedSharedServerCount} 台）',
             style: const TextStyle(fontSize: 11, color: Color(0xFF6b7c93)),
           ),
         ],
@@ -1090,7 +1268,9 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
                   final count = provider.servers
                       .where((s) => s.group == group)
                       .length;
+                  final isDefaultGroup = group == '默认分组';
                   return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 8,
@@ -1103,21 +1283,57 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
                     ),
                     child: Row(
                       children: [
-                        const Icon(
-                          Icons.folder,
-                          size: 14,
-                          color: Color(0xFF6b7c93),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(group, style: const TextStyle(fontSize: 12)),
-                        const Spacer(),
-                        Text(
-                          '($count)',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Color(0xFF6b7c93),
+                        Expanded(
+                          child: InkWell(
+                            onTap: () async {
+                              setState(() {
+                                _selectedGroup = group;
+                              });
+                              await _reloadServers();
+                            },
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.folder,
+                                  size: 14,
+                                  color: Color(0xFF6b7c93),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    group,
+                                    style: const TextStyle(fontSize: 12),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '($count)',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFF6b7c93),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
+                        if (!isDefaultGroup) ...[
+                          const SizedBox(width: 8),
+                          AppIconActionButton(
+                            icon: Icons.edit_outlined,
+                            tooltip: '重命名分组',
+                            onPressed: () => _renameGroup(provider, group),
+                          ),
+                          const SizedBox(width: 8),
+                          AppIconActionButton(
+                            icon: Icons.delete_outline,
+                            tooltip: '删除分组',
+                            onPressed: () => _deleteGroup(provider, group),
+                            foregroundColor: const Color(0xFFef4444),
+                            backgroundColor: const Color(0xFFfef2f2),
+                          ),
+                        ],
                       ],
                     ),
                   );
@@ -1126,45 +1342,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
                 const Divider(color: Color(0xFFe2e8f0)),
                 const SizedBox(height: 8),
                 ElevatedButton(
-                  onPressed: () {
-                    showDialog(
-                      context: context,
-                      builder: (context) {
-                        final controller = TextEditingController();
-                        return AlertDialog(
-                          title: const Text('新建分组'),
-                          content: TextField(
-                            controller: controller,
-                            decoration: const InputDecoration(
-                              labelText: '分组名称',
-                            ),
-                            onSubmitted: (value) {
-                              if (value.trim().isNotEmpty) {
-                                provider.addGroup(value);
-                                Navigator.pop(context);
-                              }
-                            },
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(context),
-                              child: const Text('取消'),
-                            ),
-                            TextButton(
-                              onPressed: () {
-                                final value = controller.text.trim();
-                                if (value.isNotEmpty) {
-                                  provider.addGroup(value);
-                                }
-                                Navigator.pop(context);
-                              },
-                              child: const Text('确定'),
-                            ),
-                          ],
-                        );
-                      },
-                    );
-                  },
+                  onPressed: () => _createGroup(provider),
                   style: AppButtonStyles.secondary(),
                   child: const Text('+ 新建分组'),
                 ),
@@ -1409,25 +1587,24 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
                       ],
                     ),
                   ),
-                  IconButton(
-                    tooltip: '重命名',
+                  AppIconActionButton(
+                    icon: Icons.edit_outlined,
+                    tooltip: '重命名共享组',
                     onPressed: () => _renameSharedGroup(
                       group.id,
                       group.displayName,
                     ),
-                    icon: const Icon(Icons.edit_outlined, size: 18),
                   ),
-                  IconButton(
-                    tooltip: '删除',
+                  const SizedBox(width: 8),
+                  AppIconActionButton(
+                    icon: Icons.delete_outline,
+                    tooltip: '删除共享组',
                     onPressed: () => _deleteSharedGroup(
                       group.id,
                       group.displayName,
                     ),
-                    icon: const Icon(
-                      Icons.delete_outline,
-                      size: 18,
-                      color: Color(0xFFdc2626),
-                    ),
+                    foregroundColor: const Color(0xFFdc2626),
+                    backgroundColor: const Color(0xFFfef2f2),
                   ),
                 ],
               ),

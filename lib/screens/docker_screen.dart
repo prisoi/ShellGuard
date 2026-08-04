@@ -353,8 +353,15 @@ class DockerScreenState extends State<DockerScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
           ),
           child: _isLoading
-              ? const CircularProgressIndicator(color: Colors.white)
-              : const Text('刷新'),
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                )
+              : const Text('刷新 Docker'),
         ),
       ],
     );
@@ -605,52 +612,36 @@ class DockerScreenState extends State<DockerScreen> {
                       Expanded(
                         child: Row(
                           children: [
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.play_arrow,
                               tooltip: '启动容器',
                               onPressed: () => _manageContainer(container.name, 'start'),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.play_arrow,
-                                color: Color(0xFF10b981),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFF10b981),
+                              backgroundColor: const Color(0xFFecfdf5),
                             ),
                             const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.stop,
                               tooltip: '停止容器',
                               onPressed: () => _manageContainer(container.name, 'stop'),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.stop,
-                                color: Color(0xFFef4444),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFFef4444),
+                              backgroundColor: const Color(0xFFfef2f2),
                             ),
                             const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.refresh,
                               tooltip: '重启容器',
                               onPressed: () => _manageContainer(container.name, 'restart'),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.refresh,
-                                color: Color(0xFF2563eb),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFF2563eb),
+                              backgroundColor: const Color(0xFFeff6ff),
                             ),
                             const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.delete_outline,
                               tooltip: '删除容器',
                               onPressed: () => _removeContainer(container.name),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.delete,
-                                color: Color(0xFFef4444),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFFef4444),
+                              backgroundColor: const Color(0xFFfef2f2),
                             ),
                           ],
                         ),
@@ -789,15 +780,14 @@ class DockerScreenState extends State<DockerScreen> {
                         ),
                       ),
                       Expanded(
-                        child: IconButton(
-                          tooltip: '删除镜像',
-                          onPressed: () => _removeImage(image.id),
-                          splashRadius: 18,
-                          visualDensity: VisualDensity.compact,
-                          icon: const Icon(
-                            Icons.delete,
-                            color: Color(0xFFef4444),
-                            size: 18,
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: AppIconActionButton(
+                            icon: Icons.delete_outline,
+                            tooltip: '删除镜像',
+                            onPressed: () => _removeImage(image.id),
+                            foregroundColor: const Color(0xFFef4444),
+                            backgroundColor: const Color(0xFFfef2f2),
                           ),
                         ),
                       ),

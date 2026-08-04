@@ -99,6 +99,7 @@ class DashboardScreenState extends State<DashboardScreen> {
   Widget _buildSystemInfoBar(AppProvider provider) {
     final updatedAt =
         provider.currentCache?.scopeUpdatedAt[RefreshScope.dashboard.key];
+    final primaryGpu = _resourceUsage?.primaryGpu;
     return Container(
       height: 40,
       color: const Color(0xFFf8fafc),
@@ -111,6 +112,19 @@ class DashboardScreenState extends State<DashboardScreen> {
               '当前服务器: ${provider.selectedServer?.ip ?? '未选择'}',
               style: const TextStyle(color: Color(0xFF6b7c93), fontSize: 12),
             ),
+            const SizedBox(width: 20),
+            Text(
+              '系统: ${_systemInfo?.osDisplayLabel ?? provider.selectedServer?.osDisplayLabel ?? '未知'}',
+              style: const TextStyle(color: Color(0xFF6b7c93), fontSize: 12),
+            ),
+            if ((_systemInfo?.packageManager.isNotEmpty ?? false) ||
+                (provider.selectedServer?.packageManager?.isNotEmpty ?? false)) ...[
+              const SizedBox(width: 20),
+              Text(
+                '包管理: ${_systemInfo?.packageManager.isNotEmpty == true ? _systemInfo!.packageManager : provider.selectedServer?.packageManager ?? '未知'}',
+                style: const TextStyle(color: Color(0xFF6b7c93), fontSize: 12),
+              ),
+            ],
             const SizedBox(width: 20),
             Text(
               '更新时间: ${updatedAt == null ? '暂无' : _formatTimestamp(updatedAt)}',
@@ -141,6 +155,13 @@ class DashboardScreenState extends State<DashboardScreen> {
               '磁盘: ${_systemInfo?.diskTotal ?? '未知'}',
               style: const TextStyle(color: Color(0xFF6b7c93), fontSize: 12),
             ),
+            if (primaryGpu != null) ...[
+              const SizedBox(width: 20),
+              Text(
+                'GPU: ${primaryGpu.name}',
+                style: const TextStyle(color: Color(0xFF6b7c93), fontSize: 12),
+              ),
+            ],
           ],
         ),
       ),
@@ -152,45 +173,73 @@ class DashboardScreenState extends State<DashboardScreen> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    return GridView.count(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisCount: 4,
-      crossAxisSpacing: 16,
-      mainAxisSpacing: 16,
-      childAspectRatio: 1.5,
-      children: [
+    final cards = <Widget>[
+      _buildStatCard(
+        'CPU 使用率',
+        '${_resourceUsage?.cpuUsage.toStringAsFixed(1) ?? '0'}%',
+        const Color(0xFF2563eb),
+        Icons.memory,
+        progress: (_resourceUsage?.cpuUsage ?? 0) / 100,
+      ),
+      _buildStatCard(
+        '内存占用',
+        _resourceUsage?.memoryUsed ?? '0',
+        const Color(0xFF10b981),
+        Icons.storage,
+        subText: '/ ${_resourceUsage?.memoryTotal ?? '0'}',
+        progress: (_resourceUsage?.memoryPercent ?? 0) / 100,
+      ),
+      _buildStatCard(
+        '磁盘使用',
+        _resourceUsage?.diskUsed ?? '0',
+        const Color(0xFFf59e0b),
+        Icons.storage,
+        subText: '/ ${_resourceUsage?.diskTotal ?? '0'}',
+        progress: (_resourceUsage?.diskPercent ?? 0) / 100,
+      ),
+      _buildStatCard(
+        '网络流量',
+        '↑ ${_resourceUsage?.networkUpload ?? '0'}',
+        const Color(0xFF1a2332),
+        Icons.network_check,
+        subText: '↓ ${_resourceUsage?.networkDownload ?? '0'}',
+      ),
+    ];
+    final primaryGpu = _resourceUsage?.primaryGpu;
+    if (primaryGpu != null) {
+      cards.add(
         _buildStatCard(
-          'CPU 使用率',
-          '${_resourceUsage?.cpuUsage.toStringAsFixed(1) ?? '0'}%',
-          const Color(0xFF2563eb),
-          Icons.memory,
-          progress: (_resourceUsage?.cpuUsage ?? 0) / 100,
+          '${primaryGpu.vendor.toUpperCase()} GPU',
+          primaryGpu.memoryUsed,
+          const Color(0xFF7C3AED),
+          Icons.view_in_ar,
+          subText: '/ ${primaryGpu.memoryTotal} · 核心 ${primaryGpu.utilizationPercent.toStringAsFixed(0)}%',
+          progress: primaryGpu.memoryPercent / 100,
         ),
-        _buildStatCard(
-          '内存占用',
-          _resourceUsage?.memoryUsed ?? '0',
-          const Color(0xFF10b981),
-          Icons.storage,
-          subText: '/ ${_resourceUsage?.memoryTotal ?? '0'}',
-          progress: (_resourceUsage?.memoryPercent ?? 0) / 100,
-        ),
-        _buildStatCard(
-          '磁盘使用',
-          _resourceUsage?.diskUsed ?? '0',
-          const Color(0xFFf59e0b),
-          Icons.storage,
-          subText: '/ ${_resourceUsage?.diskTotal ?? '0'}',
-          progress: (_resourceUsage?.diskPercent ?? 0) / 100,
-        ),
-        _buildStatCard(
-          '网络流量',
-          '↑ ${_resourceUsage?.networkUpload ?? '0'}',
-          const Color(0xFF1a2332),
-          Icons.network_check,
-          subText: '↓ ${_resourceUsage?.networkDownload ?? '0'}',
-        ),
-      ],
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final crossAxisCount = width >= 1280
+            ? 4
+            : width >= 900
+                ? 3
+                : width >= 620
+                    ? 2
+                    : 1;
+        final ratio = crossAxisCount == 1 ? 2.4 : 1.5;
+        return GridView.count(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisCount: crossAxisCount,
+          crossAxisSpacing: 16,
+          mainAxisSpacing: 16,
+          childAspectRatio: ratio,
+          children: cards,
+        );
+      },
     );
   }
 

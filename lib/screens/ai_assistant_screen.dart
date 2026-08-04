@@ -177,6 +177,27 @@ class _AiAssistantScreenState extends State<AiAssistantScreen> {
                                 ),
                               ],
                             ),
+                            const SizedBox(height: 8),
+                            Text(
+                              server.osDisplayLabel,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: AppColors.textMuted,
+                              ),
+                            ),
+                            if ((server.packageManager?.trim().isNotEmpty ?? false) ||
+                                (server.firewallBackend?.trim().isNotEmpty ?? false))
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  'pkg:${server.packageManager?.trim().isEmpty ?? true ? 'unknown' : server.packageManager} · '
+                                  'fw:${server.firewallBackend?.trim().isEmpty ?? true ? 'unknown' : server.firewallBackend}',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: AppColors.textMuted,
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                 ),

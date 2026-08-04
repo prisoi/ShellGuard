@@ -4,6 +4,7 @@ import '../core/refresh_scope.dart';
 import '../models/query_options.dart';
 import '../providers/app_provider.dart';
 import '../models/server.dart';
+import '../widgets/adaptive_page_layout.dart';
 import '../widgets/app_button_styles.dart';
 import '../widgets/sort_header_cell.dart';
 
@@ -339,54 +340,105 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
   Widget build(BuildContext context) {
     final provider = Provider.of<AppProvider>(context);
 
-    return Container(
-      padding: const EdgeInsets.all(20),
-      color: const Color(0xFFf0f4f8),
-      child: Column(
-        children: [
-          _buildTopBar(provider),
-          const SizedBox(height: 16),
-          _buildStatusCards(),
-          const SizedBox(height: 16),
-          Expanded(child: _buildServicesTable()),
-        ],
-      ),
+    return AdaptivePageLayout(
+      estimatedReservedHeight: 220,
+      minBodyHeight: 260,
+      header: [
+        _buildTopBar(provider),
+        const SizedBox(height: 16),
+        _buildStatusCards(),
+        const SizedBox(height: 16),
+      ],
+      body: _buildServicesTable(),
     );
   }
 
   Widget _buildTopBar(AppProvider provider) {
-    return Row(
-      children: [
-        Expanded(
-          child: AppControlShell(
-            child: TextField(
-              decoration: AppFieldStyles.toolbarInput(hintText: '搜索服务名称或描述...'),
-              onChanged: (text) {
-                setState(() => _searchText = text);
-                _reloadServices();
-              },
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 900;
+        if (compact) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              AppControlShell(
+                child: TextField(
+                  decoration: AppFieldStyles.toolbarInput(hintText: '搜索服务名称或描述...'),
+                  onChanged: (text) {
+                    setState(() => _searchText = text);
+                    _reloadServices();
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                alignment: WrapAlignment.end,
+                children: [
+                  ElevatedButton(
+                    onPressed: provider.isConnected ? _showCreateServiceDialog : null,
+                    style: AppButtonStyles.secondary(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    ),
+                    child: const Text('托管业务程序'),
+                  ),
+                  ElevatedButton(
+                    onPressed: provider.selectedServer == null ? null : refresh,
+                    style: AppButtonStyles.primary(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    ),
+                    child: _isLoading
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                          )
+                        : const Text('刷新服务列表'),
+                  ),
+                ],
+              ),
+            ],
+          );
+        }
+        return Row(
+          children: [
+            Expanded(
+              child: AppControlShell(
+                child: TextField(
+                  decoration: AppFieldStyles.toolbarInput(hintText: '搜索服务名称或描述...'),
+                  onChanged: (text) {
+                    setState(() => _searchText = text);
+                    _reloadServices();
+                  },
+                ),
+              ),
             ),
-          ),
-        ),
-        const SizedBox(width: 16),
-        ElevatedButton(
-          onPressed: provider.isConnected ? _showCreateServiceDialog : null,
-          style: AppButtonStyles.secondary(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          ),
-          child: const Text('托管业务程序'),
-        ),
-        const SizedBox(width: 16),
-        ElevatedButton(
-          onPressed: provider.selectedServer == null ? null : refresh,
-          style: AppButtonStyles.primary(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-          ),
-          child: _isLoading
-              ? const CircularProgressIndicator(color: Colors.white)
-              : const Text('刷新服务列表'),
-        ),
-      ],
+            const SizedBox(width: 16),
+            ElevatedButton(
+              onPressed: provider.isConnected ? _showCreateServiceDialog : null,
+              style: AppButtonStyles.secondary(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              child: const Text('托管业务程序'),
+            ),
+            const SizedBox(width: 16),
+            ElevatedButton(
+              onPressed: provider.selectedServer == null ? null : refresh,
+              style: AppButtonStyles.primary(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              ),
+              child: _isLoading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                    )
+                  : const Text('刷新服务列表'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -397,92 +449,61 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
         .length;
     final failed = _services.where((s) => s.status == 'failed').length;
 
-    return Row(
-      children: [
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFFe2e8f0)),
-            ),
-            child: Column(
-              children: [
-                const Text(
-                  '运行中',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF6b7c93)),
+    Widget statCard(String label, String value, Color color) {
+      return SizedBox(
+        width: 220,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFe2e8f0)),
+          ),
+          child: Column(
+            children: [
+              Text(
+                label,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF6b7c93)),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: color,
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  running.toString(),
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF10b981),
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFFe2e8f0)),
-            ),
-            child: Column(
-              children: [
-                const Text(
-                  '已停止',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF6b7c93)),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  stopped.toString(),
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF6b7c93),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFFe2e8f0)),
-            ),
-            child: Column(
-              children: [
-                const Text(
-                  '失败',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF6b7c93)),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  failed.toString(),
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFFef4444),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final cardWidth = (constraints.maxWidth - 32) / 3;
+        if (cardWidth >= 220) {
+          return Row(
+            children: [
+              Expanded(child: statCard('运行中', running.toString(), const Color(0xFF10b981))),
+              const SizedBox(width: 16),
+              Expanded(child: statCard('已停止', stopped.toString(), const Color(0xFF6b7c93))),
+              const SizedBox(width: 16),
+              Expanded(child: statCard('失败', failed.toString(), const Color(0xFFef4444))),
+            ],
+          );
+        }
+        return Wrap(
+          spacing: 16,
+          runSpacing: 16,
+          children: [
+            statCard('运行中', running.toString(), const Color(0xFF10b981)),
+            statCard('已停止', stopped.toString(), const Color(0xFF6b7c93)),
+            statCard('失败', failed.toString(), const Color(0xFFef4444)),
+          ],
+        );
+      },
     );
   }
 
@@ -526,7 +547,8 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
                   ascending: _sortAscending,
                   onTap: () => _toggleSort('enabled'),
                 ),
-                Expanded(
+                const Expanded(
+                  flex: 2,
                   child: Text(
                     '操作',
                     style: TextStyle(
@@ -618,83 +640,54 @@ class ServiceManagementScreenState extends State<ServiceManagementScreen> {
                         ),
                       ),
                       Expanded(
-                        child: Row(
+                        flex: 2,
+                        child: Wrap(
+                          spacing: 2,
+                          runSpacing: 2,
                           children: [
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.play_arrow,
                               tooltip: '启动服务',
                               onPressed: () => _manageService(service.name, 'start'),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.play_arrow,
-                                color: Color(0xFF10b981),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFF10b981),
+                              backgroundColor: const Color(0xFFecfdf5),
                             ),
-                            const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.stop,
                               tooltip: '停止服务',
                               onPressed: () => _manageService(service.name, 'stop'),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.stop,
-                                color: Color(0xFFef4444),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFFef4444),
+                              backgroundColor: const Color(0xFFfef2f2),
                             ),
-                            const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.refresh,
                               tooltip: '重启服务',
                               onPressed: () => _manageService(service.name, 'restart'),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.refresh,
-                                color: Color(0xFF2563eb),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFF2563eb),
+                              backgroundColor: const Color(0xFFeff6ff),
                             ),
-                            const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.sync,
                               tooltip: '重载服务',
                               onPressed: () => _manageService(service.name, 'reload'),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.sync,
-                                color: Color(0xFFf59e0b),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFFf59e0b),
+                              backgroundColor: const Color(0xFFfffbeb),
                             ),
-                            const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: service.isEnabled ? Icons.toggle_on : Icons.toggle_off,
                               tooltip: service.isEnabled ? '关闭开机自启' : '开启开机自启',
                               onPressed: () => _manageService(
                                 service.name,
                                 service.isEnabled ? 'disable' : 'enable',
                               ),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: Icon(
-                                service.isEnabled
-                                    ? Icons.toggle_on
-                                    : Icons.toggle_off,
-                                color: const Color(0xFF6b7c93),
-                                size: 18,
-                              ),
+                              foregroundColor: const Color(0xFF6b7c93),
+                              iconSize: 18,
                             ),
-                            const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.article_outlined,
                               tooltip: '查看服务日志',
                               onPressed: () => _showServiceLogs(service.name),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.article_outlined,
-                                color: Color(0xFF1a2332),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFF1a2332),
                             ),
                           ],
                         ),

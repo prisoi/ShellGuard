@@ -241,6 +241,13 @@ class SshEngine {
         return server.copyWith(
           isOnline: true,
           osInfo: systemInfo.osInfo,
+          osId: systemInfo.osId,
+          osName: systemInfo.osName,
+          osVersion: systemInfo.osVersion,
+          osFamily: systemInfo.osFamily,
+          packageManager: systemInfo.packageManager,
+          serviceManager: systemInfo.serviceManager,
+          firewallBackend: systemInfo.firewallBackend,
           kernelVersion: systemInfo.kernelVersion,
           uptime: systemInfo.uptime,
         );

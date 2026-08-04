@@ -10,6 +10,13 @@ class Server {
   final List<String> tags;
   final bool isOnline;
   final String? osInfo;
+  final String? osId;
+  final String? osName;
+  final String? osVersion;
+  final String? osFamily;
+  final String? packageManager;
+  final String? serviceManager;
+  final String? firewallBackend;
   final String? kernelVersion;
   final String? uptime;
 
@@ -25,6 +32,13 @@ class Server {
     this.tags = const [],
     this.isOnline = false,
     this.osInfo,
+    this.osId,
+    this.osName,
+    this.osVersion,
+    this.osFamily,
+    this.packageManager,
+    this.serviceManager,
+    this.firewallBackend,
     this.kernelVersion,
     this.uptime,
   });
@@ -41,6 +55,13 @@ class Server {
     List<String>? tags,
     bool? isOnline,
     String? osInfo,
+    String? osId,
+    String? osName,
+    String? osVersion,
+    String? osFamily,
+    String? packageManager,
+    String? serviceManager,
+    String? firewallBackend,
     String? kernelVersion,
     String? uptime,
   }) {
@@ -56,9 +77,39 @@ class Server {
       tags: tags ?? this.tags,
       isOnline: isOnline ?? this.isOnline,
       osInfo: osInfo ?? this.osInfo,
+      osId: osId ?? this.osId,
+      osName: osName ?? this.osName,
+      osVersion: osVersion ?? this.osVersion,
+      osFamily: osFamily ?? this.osFamily,
+      packageManager: packageManager ?? this.packageManager,
+      serviceManager: serviceManager ?? this.serviceManager,
+      firewallBackend: firewallBackend ?? this.firewallBackend,
       kernelVersion: kernelVersion ?? this.kernelVersion,
       uptime: uptime ?? this.uptime,
     );
+  }
+
+  String get osDisplayLabel {
+    final primary = (osName?.trim().isNotEmpty ?? false)
+        ? osName!.trim()
+        : (osInfo?.trim().isNotEmpty ?? false)
+            ? osInfo!.trim()
+            : '未知 Linux';
+    final version = osVersion?.trim() ?? '';
+    if (version.isNotEmpty && !primary.contains(version)) {
+      return '$primary $version';
+    }
+    return primary;
+  }
+
+  String get platformSummary {
+    final parts = <String>[
+      osDisplayLabel,
+      if (osFamily?.trim().isNotEmpty ?? false) osFamily!.trim(),
+      if (packageManager?.trim().isNotEmpty ?? false) 'pkg:${packageManager!.trim()}',
+      if (firewallBackend?.trim().isNotEmpty ?? false) 'fw:${firewallBackend!.trim()}',
+    ];
+    return parts.join(' · ');
   }
 
   Map<String, dynamic> toJson() {
@@ -74,6 +125,13 @@ class Server {
       'tags': tags,
       'isOnline': isOnline,
       'osInfo': osInfo,
+      'osId': osId,
+      'osName': osName,
+      'osVersion': osVersion,
+      'osFamily': osFamily,
+      'packageManager': packageManager,
+      'serviceManager': serviceManager,
+      'firewallBackend': firewallBackend,
       'kernelVersion': kernelVersion,
       'uptime': uptime,
     };
@@ -92,6 +150,13 @@ class Server {
       tags: List<String>.from(json['tags'] ?? []),
       isOnline: json['isOnline'] ?? false,
       osInfo: json['osInfo'],
+      osId: json['osId'],
+      osName: json['osName'],
+      osVersion: json['osVersion'],
+      osFamily: json['osFamily'],
+      packageManager: json['packageManager'],
+      serviceManager: json['serviceManager'],
+      firewallBackend: json['firewallBackend'],
       kernelVersion: json['kernelVersion'],
       uptime: json['uptime'],
     );
@@ -100,6 +165,13 @@ class Server {
 
 class SystemInfo {
   final String osInfo;
+  final String osId;
+  final String osName;
+  final String osVersion;
+  final String osFamily;
+  final String packageManager;
+  final String serviceManager;
+  final String firewallBackend;
   final String kernelVersion;
   final String uptime;
   final int cpuCores;
@@ -108,11 +180,365 @@ class SystemInfo {
 
   SystemInfo({
     required this.osInfo,
+    this.osId = '',
+    this.osName = '',
+    this.osVersion = '',
+    this.osFamily = '',
+    this.packageManager = '',
+    this.serviceManager = '',
+    this.firewallBackend = '',
     required this.kernelVersion,
     required this.uptime,
     required this.cpuCores,
     required this.memoryTotal,
     required this.diskTotal,
+  });
+
+  String get osDisplayLabel {
+    final primary = osName.trim().isNotEmpty
+        ? osName.trim()
+        : osInfo.trim().isNotEmpty
+            ? osInfo.trim()
+            : '未知 Linux';
+    if (osVersion.trim().isNotEmpty && !primary.contains(osVersion.trim())) {
+      return '$primary ${osVersion.trim()}';
+    }
+    return primary;
+  }
+}
+
+class LinuxPlatformSupport {
+  static String detectFamily({
+    required String osId,
+    required String osInfo,
+    String idLike = '',
+  }) {
+    final joined = '$osId $idLike $osInfo'.toLowerCase();
+    if (joined.contains('ubuntu') || joined.contains('debian')) {
+      return 'debian';
+    }
+    if (joined.contains('rhel') ||
+        joined.contains('redhat') ||
+        joined.contains('centos') ||
+        joined.contains('rocky') ||
+        joined.contains('almalinux') ||
+        joined.contains('fedora') ||
+        joined.contains('ol ') ||
+        joined.contains('oracle linux')) {
+      return 'redhat';
+    }
+    if (joined.contains('suse') || joined.contains('opensuse')) {
+      return 'suse';
+    }
+    if (joined.contains('arch')) {
+      return 'arch';
+    }
+    if (joined.contains('alpine')) {
+      return 'alpine';
+    }
+    return 'linux';
+  }
+
+  static String detectPackageManager({
+    required String family,
+    required List<String> availableCommands,
+  }) {
+    if (availableCommands.contains('apt-get')) return 'apt';
+    if (availableCommands.contains('dnf')) return 'dnf';
+    if (availableCommands.contains('yum')) return 'yum';
+    if (availableCommands.contains('zypper')) return 'zypper';
+    if (availableCommands.contains('pacman')) return 'pacman';
+    if (availableCommands.contains('apk')) return 'apk';
+    switch (family) {
+      case 'debian':
+        return 'apt';
+      case 'redhat':
+        return 'yum';
+      case 'suse':
+        return 'zypper';
+      case 'arch':
+        return 'pacman';
+      case 'alpine':
+        return 'apk';
+      default:
+        return 'unknown';
+    }
+  }
+
+  static String detectServiceManager(List<String> availableCommands) {
+    if (availableCommands.contains('systemctl')) {
+      return 'systemd';
+    }
+    if (availableCommands.contains('service')) {
+      return 'sysvinit';
+    }
+    return 'unknown';
+  }
+
+  static String detectFirewallBackend(List<String> availableCommands) {
+    if (availableCommands.contains('ufw')) {
+      return 'ufw';
+    }
+    if (availableCommands.contains('firewall-cmd')) {
+      return 'firewalld';
+    }
+    if (availableCommands.contains('iptables')) {
+      return 'iptables';
+    }
+    return 'none';
+  }
+
+  static String resolveInstallPackageName(String toolName, String packageManager) {
+    switch (toolName) {
+      case 'dig':
+        return packageManager == 'apt' ? 'dnsutils' : 'bind-utils';
+      case 'nc':
+        if (packageManager == 'apt') return 'netcat-openbsd';
+        if (packageManager == 'apk') return 'netcat-openbsd';
+        return 'nmap-ncat';
+      case 'iproute2':
+        if (packageManager == 'yum' || packageManager == 'dnf') return 'iproute';
+        return 'iproute2';
+      case 'docker':
+        if (packageManager == 'apt') return 'docker.io';
+        return 'docker';
+      case 'ufw':
+        if (packageManager == 'yum' || packageManager == 'dnf') return 'firewalld';
+        return 'ufw';
+      case 'pip':
+        if (packageManager == 'apk') return 'py3-pip';
+        return 'python3-pip';
+      case 'python3':
+        if (packageManager == 'apk') return 'python3';
+        return 'python3';
+      default:
+        return toolName;
+    }
+  }
+
+  static String buildInstallCommand({
+    required String packageManager,
+    required String toolName,
+  }) {
+    if (toolName == 'uv') {
+      return _buildUvInstallCommand();
+    }
+    final packageName = resolveInstallPackageName(toolName, packageManager);
+    switch (packageManager) {
+      case 'apt':
+        return _buildAptInstallCommand(packageName);
+      case 'dnf':
+        return 'dnf install -y $packageName';
+      case 'yum':
+        return 'yum install -y $packageName';
+      case 'zypper':
+        return 'zypper --non-interactive install $packageName';
+      case 'pacman':
+        return 'pacman -Sy --noconfirm $packageName';
+      case 'apk':
+        return 'apk add --no-cache $packageName';
+      default:
+        return 'echo "Unsupported package manager: $packageManager"';
+    }
+  }
+
+  static String _buildAptInstallCommand(String packageName) {
+    return "bash -lc '"
+        "set -e; "
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "if apt-get install -y $packageName; then "
+        "  exit 0; "
+        "fi; "
+        "if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then "
+        "  apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources "
+        "          -o Dir::Etc::sourceparts=/dev/null "
+        "          -o Acquire::AllowReleaseInfoChange=true "
+        "          update; "
+        "  apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources "
+        "          -o Dir::Etc::sourceparts=/dev/null "
+        "          install -y $packageName; "
+        "elif [ -f /etc/apt/sources.list ]; then "
+        "  apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list "
+        "          -o Dir::Etc::sourceparts=/dev/null "
+        "          -o Acquire::AllowReleaseInfoChange=true "
+        "          update; "
+        "  apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list "
+        "          -o Dir::Etc::sourceparts=/dev/null "
+        "          install -y $packageName; "
+        "else "
+        "  echo \"APT 软件源不可用，请先检查系统软件源配置\"; "
+        "  exit 1; "
+        "fi"
+        "'";
+  }
+
+  static String _buildUvInstallCommand() {
+    return 'bash -lc \''
+        'if command -v curl >/dev/null 2>&1; then '
+        'curl -LsSf https://astral.sh/uv/install.sh | sh; '
+        'elif command -v wget >/dev/null 2>&1; then '
+        'wget -qO- https://astral.sh/uv/install.sh | sh; '
+        'else '
+        'echo "uv 安装需要 curl 或 wget"; exit 1; '
+        'fi'
+        '\'';
+  }
+
+  static String buildServiceCommand({
+    required String serviceManager,
+    required String serviceName,
+    required String action,
+  }) {
+    final normalizedService = serviceName.endsWith('.service')
+        ? serviceName
+        : '$serviceName.service';
+    if (serviceManager == 'systemd') {
+      return 'systemctl $action $normalizedService';
+    }
+    return 'service $serviceName $action';
+  }
+
+  static String buildServiceLogCommand({
+    required String serviceManager,
+    required String serviceName,
+    int lines = 80,
+  }) {
+    final normalizedService = serviceName.endsWith('.service')
+        ? serviceName
+        : '$serviceName.service';
+    if (serviceManager == 'systemd') {
+      return 'journalctl -u $normalizedService -n $lines --no-pager 2>/dev/null';
+    }
+    return 'tail -n $lines /var/log/messages 2>/dev/null || tail -n $lines /var/log/syslog 2>/dev/null';
+  }
+
+  static String buildUfwCommand({
+    required String action,
+    String? port,
+    String? protocol,
+    String? source,
+    String? ruleNumber,
+    String? ruleAction,
+  }) {
+    final normalizedPort = port?.trim();
+    final normalizedProtocol = protocol?.trim().toLowerCase();
+    final normalizedSource = source?.trim();
+    final ruleVerb = ruleAction?.trim().toLowerCase() ?? 'allow';
+
+    String buildRuleCommand(String verb) {
+      if (normalizedSource != null && normalizedSource.isNotEmpty) {
+        if (normalizedPort != null && normalizedPort.isNotEmpty) {
+          return '$verb from $normalizedSource to any port $normalizedPort'
+              '${normalizedProtocol == null || normalizedProtocol.isEmpty ? '' : ' proto $normalizedProtocol'}';
+        }
+        return '$verb from $normalizedSource';
+      }
+      if (normalizedPort != null && normalizedPort.isNotEmpty) {
+        return '$verb $normalizedPort/${normalizedProtocol ?? 'tcp'}';
+      }
+      throw Exception('Firewall rule requires port or source');
+    }
+
+    switch (action) {
+      case 'enable':
+        return 'ufw enable';
+      case 'disable':
+        return 'ufw disable';
+      case 'allow':
+        return 'ufw ${buildRuleCommand('allow')}';
+      case 'deny':
+        return 'ufw ${buildRuleCommand('deny')}';
+      case 'delete':
+        if (ruleNumber != null && ruleNumber.trim().isNotEmpty) {
+          return 'ufw --force delete ${ruleNumber.trim()}';
+        }
+        return 'ufw delete ${buildRuleCommand(ruleVerb)}';
+      case 'reset':
+        return 'ufw reset';
+      default:
+        throw Exception('Unknown firewall action');
+    }
+  }
+
+  static String buildFirewalldCommand({
+    required String action,
+    String? port,
+    String? protocol,
+    String? source,
+    String? ruleAction,
+  }) {
+    final normalizedPort = port?.trim();
+    final normalizedProtocol = (protocol?.trim().isEmpty ?? true)
+        ? 'tcp'
+        : protocol!.trim().toLowerCase();
+    final normalizedSource = source?.trim();
+    final verb = (ruleAction?.trim().toLowerCase() ?? action).toLowerCase();
+    final richAction = verb == 'deny' ? 'reject' : 'accept';
+
+    String buildRichRule() {
+      if (normalizedPort != null && normalizedPort.isNotEmpty) {
+        final sourceSegment = normalizedSource == null || normalizedSource.isEmpty
+            ? ''
+            : ' source address="$normalizedSource"';
+        return 'rule family="ipv4"$sourceSegment port port="$normalizedPort" protocol="$normalizedProtocol" $richAction';
+      }
+      if (normalizedSource != null && normalizedSource.isNotEmpty) {
+        return 'rule family="ipv4" source address="$normalizedSource" $richAction';
+      }
+      throw Exception('Firewall rule requires port or source');
+    }
+
+    switch (action) {
+      case 'enable':
+        return 'systemctl enable --now firewalld';
+      case 'disable':
+        return 'systemctl disable --now firewalld';
+      case 'allow':
+        if ((normalizedSource == null || normalizedSource.isEmpty) &&
+            normalizedPort != null &&
+            normalizedPort.isNotEmpty) {
+          return 'firewall-cmd --permanent --add-port=$normalizedPort/$normalizedProtocol && firewall-cmd --reload';
+        }
+        return 'firewall-cmd --permanent --add-rich-rule=\'${buildRichRule()}\' && firewall-cmd --reload';
+      case 'deny':
+        return 'firewall-cmd --permanent --add-rich-rule=\'${buildRichRule()}\' && firewall-cmd --reload';
+      case 'delete':
+        if ((normalizedSource == null || normalizedSource.isEmpty) &&
+            verb == 'allow' &&
+            normalizedPort != null &&
+            normalizedPort.isNotEmpty) {
+          return 'firewall-cmd --permanent --remove-port=$normalizedPort/$normalizedProtocol && firewall-cmd --reload';
+        }
+        return 'firewall-cmd --permanent --remove-rich-rule=\'${buildRichRule()}\' && firewall-cmd --reload';
+      case 'reset':
+        throw Exception('当前 firewalld 后端暂不支持一键重置，请手动清理规则');
+      default:
+        throw Exception('Unknown firewall action');
+    }
+  }
+}
+
+class GpuDeviceUsage {
+  final int index;
+  final String vendor;
+  final String name;
+  final double utilizationPercent;
+  final String memoryUsed;
+  final String memoryTotal;
+  final double memoryPercent;
+  final String? temperature;
+  final String? note;
+
+  const GpuDeviceUsage({
+    required this.index,
+    required this.vendor,
+    required this.name,
+    required this.utilizationPercent,
+    required this.memoryUsed,
+    required this.memoryTotal,
+    required this.memoryPercent,
+    this.temperature,
+    this.note,
   });
 }
 
@@ -127,6 +553,7 @@ class ResourceUsage {
   final String networkUpload;
   final String networkDownload;
   final int activeConnections;
+  final List<GpuDeviceUsage> gpuDevices;
 
   ResourceUsage({
     required this.cpuUsage,
@@ -139,7 +566,12 @@ class ResourceUsage {
     required this.networkUpload,
     required this.networkDownload,
     required this.activeConnections,
+    this.gpuDevices = const <GpuDeviceUsage>[],
   });
+
+  bool get hasGpu => gpuDevices.isNotEmpty;
+
+  GpuDeviceUsage? get primaryGpu => gpuDevices.isEmpty ? null : gpuDevices.first;
 }
 
 class ProcessInfo {

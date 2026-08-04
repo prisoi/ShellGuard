@@ -4,6 +4,7 @@ class CacheData {
   final String serverId;
   final DateTime timestamp;
   final Map<String, String> scopeUpdatedAt;
+  final Map<String, bool> installedTools;
   final SystemInfo? systemInfo;
   final ResourceUsage? resourceUsage;
   final List<ProcessInfo>? processes;
@@ -20,6 +21,7 @@ class CacheData {
     required this.serverId,
     required this.timestamp,
     Map<String, String>? scopeUpdatedAt,
+    Map<String, bool>? installedTools,
     this.systemInfo,
     this.resourceUsage,
     this.processes,
@@ -31,7 +33,8 @@ class CacheData {
     this.dockerImages,
     this.files,
     this.currentPath,
-  }) : scopeUpdatedAt = scopeUpdatedAt ?? <String, String>{};
+  })  : scopeUpdatedAt = scopeUpdatedAt ?? <String, String>{},
+        installedTools = installedTools ?? <String, bool>{};
 
   bool isFresh(Duration maxAge) {
     return DateTime.now().difference(timestamp) < maxAge;
@@ -40,6 +43,7 @@ class CacheData {
   CacheData copyWith({
     DateTime? timestamp,
     Map<String, String>? scopeUpdatedAt,
+    Map<String, bool>? installedTools,
     SystemInfo? systemInfo,
     ResourceUsage? resourceUsage,
     List<ProcessInfo>? processes,
@@ -56,6 +60,7 @@ class CacheData {
       serverId: serverId,
       timestamp: timestamp ?? this.timestamp,
       scopeUpdatedAt: scopeUpdatedAt ?? this.scopeUpdatedAt,
+      installedTools: installedTools ?? this.installedTools,
       systemInfo: systemInfo ?? this.systemInfo,
       resourceUsage: resourceUsage ?? this.resourceUsage,
       processes: processes ?? this.processes,
@@ -75,8 +80,16 @@ class CacheData {
       'serverId': serverId,
       'timestamp': timestamp.toIso8601String(),
       'scopeUpdatedAt': scopeUpdatedAt,
+      'installedTools': installedTools,
       'systemInfo': systemInfo != null ? {
         'osInfo': systemInfo!.osInfo,
+        'osId': systemInfo!.osId,
+        'osName': systemInfo!.osName,
+        'osVersion': systemInfo!.osVersion,
+        'osFamily': systemInfo!.osFamily,
+        'packageManager': systemInfo!.packageManager,
+        'serviceManager': systemInfo!.serviceManager,
+        'firewallBackend': systemInfo!.firewallBackend,
         'kernelVersion': systemInfo!.kernelVersion,
         'uptime': systemInfo!.uptime,
         'cpuCores': systemInfo!.cpuCores,
@@ -94,6 +107,17 @@ class CacheData {
         'networkUpload': resourceUsage!.networkUpload,
         'networkDownload': resourceUsage!.networkDownload,
         'activeConnections': resourceUsage!.activeConnections,
+        'gpuDevices': resourceUsage!.gpuDevices.map((gpu) => {
+          'index': gpu.index,
+          'vendor': gpu.vendor,
+          'name': gpu.name,
+          'utilizationPercent': gpu.utilizationPercent,
+          'memoryUsed': gpu.memoryUsed,
+          'memoryTotal': gpu.memoryTotal,
+          'memoryPercent': gpu.memoryPercent,
+          'temperature': gpu.temperature,
+          'note': gpu.note,
+        }).toList(),
       } : null,
       'processes': processes?.map((p) => {
         'pid': p.pid,
@@ -159,8 +183,23 @@ class CacheData {
       serverId: json['serverId'],
       timestamp: DateTime.parse(json['timestamp']),
       scopeUpdatedAt: Map<String, String>.from(json['scopeUpdatedAt'] ?? const <String, String>{}),
+      installedTools: (json['installedTools'] as Map?)
+              ?.map(
+                (key, value) => MapEntry(
+                  key.toString(),
+                  value == true,
+                ),
+              ) ??
+          const <String, bool>{},
       systemInfo: json['systemInfo'] != null ? SystemInfo(
         osInfo: json['systemInfo']['osInfo'],
+        osId: json['systemInfo']['osId'] ?? '',
+        osName: json['systemInfo']['osName'] ?? '',
+        osVersion: json['systemInfo']['osVersion'] ?? '',
+        osFamily: json['systemInfo']['osFamily'] ?? '',
+        packageManager: json['systemInfo']['packageManager'] ?? '',
+        serviceManager: json['systemInfo']['serviceManager'] ?? '',
+        firewallBackend: json['systemInfo']['firewallBackend'] ?? '',
         kernelVersion: json['systemInfo']['kernelVersion'],
         uptime: json['systemInfo']['uptime'],
         cpuCores: json['systemInfo']['cpuCores'],
@@ -178,6 +217,22 @@ class CacheData {
         networkUpload: json['resourceUsage']['networkUpload'],
         networkDownload: json['resourceUsage']['networkDownload'],
         activeConnections: json['resourceUsage']['activeConnections'],
+        gpuDevices: (json['resourceUsage']['gpuDevices'] as List?)
+                ?.map((item) => GpuDeviceUsage(
+                  index: item['index'] as int? ?? 0,
+                  vendor: item['vendor'] as String? ?? 'unknown',
+                  name: item['name'] as String? ?? 'GPU',
+                  utilizationPercent:
+                      (item['utilizationPercent'] as num?)?.toDouble() ?? 0,
+                  memoryUsed: item['memoryUsed'] as String? ?? '0',
+                  memoryTotal: item['memoryTotal'] as String? ?? '0',
+                  memoryPercent:
+                      (item['memoryPercent'] as num?)?.toDouble() ?? 0,
+                  temperature: item['temperature'] as String?,
+                  note: item['note'] as String?,
+                ))
+                .toList() ??
+            const <GpuDeviceUsage>[],
       ) : null,
       processes: (json['processes'] as List?)?.map((j) => ProcessInfo(
         pid: j['pid'],

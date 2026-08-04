@@ -5,6 +5,13 @@ class ShareProtocol {
   static Map<String, Object?> systemInfoToJson(SystemInfo info) {
     return {
       'osInfo': info.osInfo,
+      'osId': info.osId,
+      'osName': info.osName,
+      'osVersion': info.osVersion,
+      'osFamily': info.osFamily,
+      'packageManager': info.packageManager,
+      'serviceManager': info.serviceManager,
+      'firewallBackend': info.firewallBackend,
       'kernelVersion': info.kernelVersion,
       'uptime': info.uptime,
       'cpuCores': info.cpuCores,
@@ -16,6 +23,13 @@ class ShareProtocol {
   static SystemInfo systemInfoFromJson(Map<String, Object?> json) {
     return SystemInfo(
       osInfo: json['osInfo']!.toString(),
+      osId: json['osId']?.toString() ?? '',
+      osName: json['osName']?.toString() ?? '',
+      osVersion: json['osVersion']?.toString() ?? '',
+      osFamily: json['osFamily']?.toString() ?? '',
+      packageManager: json['packageManager']?.toString() ?? '',
+      serviceManager: json['serviceManager']?.toString() ?? '',
+      firewallBackend: json['firewallBackend']?.toString() ?? '',
       kernelVersion: json['kernelVersion']!.toString(),
       uptime: json['uptime']!.toString(),
       cpuCores: (json['cpuCores'] as num?)?.toInt() ?? 0,
@@ -36,6 +50,19 @@ class ShareProtocol {
       'networkUpload': usage.networkUpload,
       'networkDownload': usage.networkDownload,
       'activeConnections': usage.activeConnections,
+      'gpuDevices': usage.gpuDevices.map((gpu) {
+        return {
+          'index': gpu.index,
+          'vendor': gpu.vendor,
+          'name': gpu.name,
+          'utilizationPercent': gpu.utilizationPercent,
+          'memoryUsed': gpu.memoryUsed,
+          'memoryTotal': gpu.memoryTotal,
+          'memoryPercent': gpu.memoryPercent,
+          'temperature': gpu.temperature,
+          'note': gpu.note,
+        };
+      }).toList(),
     };
   }
 
@@ -51,6 +78,23 @@ class ShareProtocol {
       networkUpload: json['networkUpload']!.toString(),
       networkDownload: json['networkDownload']!.toString(),
       activeConnections: (json['activeConnections'] as num?)?.toInt() ?? 0,
+      gpuDevices: (json['gpuDevices'] as List?)
+              ?.whereType<Map>()
+              .map((item) => GpuDeviceUsage(
+                index: (item['index'] as num?)?.toInt() ?? 0,
+                vendor: item['vendor']?.toString() ?? 'unknown',
+                name: item['name']?.toString() ?? 'GPU',
+                utilizationPercent:
+                    (item['utilizationPercent'] as num?)?.toDouble() ?? 0,
+                memoryUsed: item['memoryUsed']?.toString() ?? '0',
+                memoryTotal: item['memoryTotal']?.toString() ?? '0',
+                memoryPercent:
+                    (item['memoryPercent'] as num?)?.toDouble() ?? 0,
+                temperature: item['temperature']?.toString(),
+                note: item['note']?.toString(),
+              ))
+              .toList() ??
+          const <GpuDeviceUsage>[],
     );
   }
 

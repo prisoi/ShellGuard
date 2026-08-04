@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../providers/app_provider.dart';
 import 'app_button_styles.dart';
 
@@ -138,44 +139,53 @@ class Sidebar extends StatelessWidget {
   }
 
   Widget _buildUpgradeBanner() {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 8),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF2563eb).withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '升级专业版',
-            style: TextStyle(
-              color: Color(0xFF60a5fa),
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
+    return InkWell(
+      onTap: _openProfessionalEditionPage,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 8),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF2563eb).withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '专业版',
+              style: TextStyle(
+                color: Color(0xFF60a5fa),
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            '解锁无限资产 · 批量运维',
-            style: TextStyle(color: Color(0xFF6b7c93), fontSize: 10),
-          ),
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFF2563eb).withValues(alpha: 0.5),
-              borderRadius: BorderRadius.circular(10),
+            const SizedBox(height: 4),
+            const Text(
+              '解锁无限资产，运维便捷又安全',
+              style: TextStyle(color: Color(0xFF6b7c93), fontSize: 10),
             ),
-            child: const Text(
-              '¥99/年 →',
-              style: TextStyle(color: Colors.white, fontSize: 10),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2563eb).withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Text(
+                '升级 →',
+                style: TextStyle(color: Colors.white, fontSize: 10),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
+  }
+
+  Future<void> _openProfessionalEditionPage() async {
+    final uri = Uri.parse('https://shellguard.cn');
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   Widget _buildServerQuota(AppProvider provider) {

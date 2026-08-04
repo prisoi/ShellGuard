@@ -35,6 +35,7 @@ class CacheService {
   Future<void> updateCache(String serverId, {
     SystemInfo? systemInfo,
     ResourceUsage? resourceUsage,
+    Map<String, bool>? installedTools,
     List<ProcessInfo>? processes,
     List<PortInfo>? ports,
     List<ServiceInfo>? services,
@@ -77,6 +78,7 @@ class CacheService {
       scopeUpdatedAt: nextScopeUpdatedAt,
       systemInfo: systemInfo,
       resourceUsage: resourceUsage,
+      installedTools: installedTools,
       processes: processes,
       ports: ports,
       services: services,

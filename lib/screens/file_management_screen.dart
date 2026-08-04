@@ -1440,16 +1440,17 @@ class FileManagementScreenState extends State<FileManagementScreen> {
         children: [
           Row(
             children: [
-              GestureDetector(
-                onTap: _currentPath != '/' && !_hasActiveTransfer
+              AppIconActionButton(
+                icon: Icons.arrow_back,
+                tooltip: '返回上一级',
+                onPressed: _currentPath != '/' && !_hasActiveTransfer
                     ? _goBack
                     : null,
-                child: Icon(
-                  Icons.arrow_back,
-                  color: _currentPath != '/' && !_hasActiveTransfer
-                      ? const Color(0xFF2563eb)
-                      : const Color(0xFF9ca3af),
-                ),
+                foregroundColor: _currentPath != '/' && !_hasActiveTransfer
+                    ? const Color(0xFF2563eb)
+                    : const Color(0xFF9ca3af),
+                backgroundColor: const Color(0xFFeff6ff),
+                iconSize: 18,
               ),
               const SizedBox(width: 16),
               Expanded(
@@ -1610,7 +1611,7 @@ class FileManagementScreenState extends State<FileManagementScreen> {
                           color: Color(0xFF6b7c93),
                         ),
                       )
-                    : const Text('刷新'),
+                    : const Text('刷新文件列表'),
               ),
             ],
           ),
@@ -2064,30 +2065,30 @@ class FileManagementScreenState extends State<FileManagementScreen> {
                       Expanded(
                         child: Row(
                           children: [
-                            GestureDetector(
-                              onTap: _isLoading || _hasActiveTransfer
+                            AppIconActionButton(
+                              icon: file.isDirectory
+                                  ? Icons.download_for_offline_outlined
+                                  : Icons.download_outlined,
+                              tooltip: file.isDirectory ? '下载目录' : '下载文件',
+                              onPressed: _isLoading || _hasActiveTransfer
                                   ? null
                                   : () => _downloadEntry(file),
-                              child: Icon(
-                                file.isDirectory
-                                    ? Icons.download_for_offline_outlined
-                                    : Icons.download_outlined,
-                                color: file.isDirectory
-                                    ? const Color(0xFFd97706)
-                                    : const Color(0xFF2563eb),
-                                size: 18,
-                              ),
+                              foregroundColor: file.isDirectory
+                                  ? const Color(0xFFd97706)
+                                  : const Color(0xFF2563eb),
+                              backgroundColor: file.isDirectory
+                                  ? const Color(0xFFfffbeb)
+                                  : const Color(0xFFeff6ff),
                             ),
                             const SizedBox(width: 10),
-                            GestureDetector(
-                              onTap: _isLoading || _hasActiveTransfer
+                            AppIconActionButton(
+                              icon: Icons.more_horiz,
+                              tooltip: '更多操作',
+                              onPressed: _isLoading || _hasActiveTransfer
                                   ? null
                                   : () => _showFileActions(file),
-                              child: const Icon(
-                                Icons.more_horiz,
-                                color: Color(0xFF2563eb),
-                                size: 18,
-                              ),
+                              foregroundColor: const Color(0xFF2563eb),
+                              backgroundColor: const Color(0xFFeff6ff),
                             ),
                           ],
                         ),

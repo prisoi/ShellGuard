@@ -244,7 +244,14 @@ class ProcessManagementScreenState extends State<ProcessManagementScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
           ),
           child: _isLoading
-              ? const CircularProgressIndicator(color: Colors.white)
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                )
               : const Text('刷新进程列表'),
         ),
       ],
@@ -519,28 +526,20 @@ class ProcessManagementScreenState extends State<ProcessManagementScreen> {
                       Expanded(
                         child: Row(
                           children: [
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.pause,
                               tooltip: '终止进程',
                               onPressed: () => _killProcess(process.pid, false),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.pause,
-                                color: Color(0xFFf59e0b),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFFf59e0b),
+                              backgroundColor: const Color(0xFFfffbeb),
                             ),
                             const SizedBox(width: 8),
-                            IconButton(
+                            AppIconActionButton(
+                              icon: Icons.stop,
                               tooltip: '强制终止进程',
                               onPressed: () => _killProcess(process.pid, true),
-                              splashRadius: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: const Icon(
-                                Icons.stop,
-                                color: Color(0xFFef4444),
-                                size: 16,
-                              ),
+                              foregroundColor: const Color(0xFFef4444),
+                              backgroundColor: const Color(0xFFfef2f2),
                             ),
                           ],
                         ),

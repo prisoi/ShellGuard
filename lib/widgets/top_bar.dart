@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_provider.dart';
@@ -6,10 +7,9 @@ import './app_button_styles.dart';
 
 class TopBar extends StatelessWidget {
   final String? title;
-  final Function()? onRefresh;
   final Function()? onConnect;
 
-  const TopBar({super.key, this.title, this.onRefresh, this.onConnect});
+  const TopBar({super.key, this.title, this.onConnect});
 
   @override
   Widget build(BuildContext context) {
@@ -36,11 +36,7 @@ class TopBar extends StatelessWidget {
           const SizedBox(width: 16),
           _buildConnectButton(provider, context),
           const SizedBox(width: 12),
-          _buildRefreshButton(provider),
-          const SizedBox(width: 12),
-          _buildFullscreenButton(),
-          const SizedBox(width: 12),
-          _buildUserAvatar(),
+          _buildUserMenu(),
         ],
       ),
     );
@@ -68,7 +64,7 @@ class TopBar extends StatelessWidget {
     }
 
     return AppControlShell(
-      width: 260,
+      width: 320,
       backgroundColor: const Color(0xFFf0f4f8),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
@@ -176,7 +172,13 @@ class TopBar extends StatelessWidget {
         if (!provider.canAddMoreServers) {
           ScaffoldMessenger.of(
             context,
-          ).showSnackBar(const SnackBar(content: Text('个人免费版最多支持 10 台服务器')));
+          ).showSnackBar(
+            SnackBar(
+              content: Text(
+                '个人免费版最多支持 10 台总资源（本地 ${provider.servers.length} 台，共享 ${provider.importedSharedServerCount} 台）',
+              ),
+            ),
+          );
           return;
         }
         showDialog(
@@ -222,53 +224,238 @@ class TopBar extends StatelessWidget {
     );
   }
 
-  Widget _buildRefreshButton(AppProvider provider) {
-    return GestureDetector(
-      onTap: provider.isLoading ? null : onRefresh,
-      child: Container(
-        width: 28,
-        height: 28,
-        decoration: BoxDecoration(
-          color: const Color(0xFFf0f4f8),
-          borderRadius: BorderRadius.circular(6),
+  Widget _buildUserMenu() {
+    return PopupMenuButton<int>(
+      tooltip: '账户菜单',
+      color: Colors.white,
+      surfaceTintColor: Colors.white,
+      elevation: 10,
+      position: PopupMenuPosition.under,
+      offset: const Offset(0, 8),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      constraints: const BoxConstraints(minWidth: 280, maxWidth: 280),
+      padding: EdgeInsets.zero,
+      itemBuilder: (context) => [
+        PopupMenuItem<int>(
+          enabled: false,
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+          child: _buildUserMenuHeader(),
         ),
-        child: Icon(Icons.refresh, color: const Color(0xFF6b7c93), size: 16),
-      ),
-    );
-  }
-
-  Widget _buildFullscreenButton() {
-    return GestureDetector(
-      onTap: () {},
-      child: Container(
-        width: 28,
-        height: 28,
-        decoration: BoxDecoration(
-          color: const Color(0xFFf0f4f8),
-          borderRadius: BorderRadius.circular(6),
+        const PopupMenuDivider(height: 1),
+        _buildDisabledMenuItem(
+          label: '管理账号',
+          trailingIcon: Icons.open_in_new_rounded,
         ),
-        child: Icon(Icons.fullscreen, color: const Color(0xFF6b7c93), size: 16),
-      ),
-    );
-  }
-
-  Widget _buildUserAvatar() {
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        color: AppColors.primary,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: const Center(
-        child: Text(
-          'A',
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.bold,
+        _buildDisabledMenuItem(
+          label: '消息',
+          trailing: _buildMessageBadge(),
+        ),
+        const PopupMenuDivider(height: 1),
+        _buildDisabledMenuItem(
+          label: '主题',
+          trailingText: '亮色',
+          trailingIcon: Icons.chevron_right_rounded,
+        ),
+        _buildDisabledMenuItem(label: '检查更新'),
+        _buildDisabledMenuItem(
+          label: '帮助文档',
+          trailingIcon: Icons.open_in_new_rounded,
+        ),
+        _buildDisabledMenuItem(
+          label: '联系我们',
+          trailingIcon: Icons.open_in_new_rounded,
+        ),
+        _buildDisabledMenuItem(label: '报告问题'),
+        const PopupMenuDivider(height: 1),
+        PopupMenuItem<int>(
+          enabled: false,
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+          child: Container(
+            width: double.infinity,
+            height: 44,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF1F5F9),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            alignment: Alignment.center,
+            child: const Text(
+              '前去注册',
+              style: TextStyle(
+                color: Color(0xFF94A3B8),
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
         ),
+      ],
+      child: _buildUserAvatarTrigger(),
+    );
+  }
+
+  PopupMenuItem<int> _buildDisabledMenuItem({
+    required String label,
+    IconData? trailingIcon,
+    String? trailingText,
+    Widget? trailing,
+  }) {
+    return PopupMenuItem<int>(
+      enabled: false,
+      height: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Color(0xFF94A3B8),
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          ...(trailing == null ? const <Widget>[] : <Widget>[trailing]),
+          if (trailingText != null) ...[
+            Text(
+              trailingText,
+              style: const TextStyle(
+                color: Color(0xFF94A3B8),
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            if (trailingIcon != null) const SizedBox(width: 4),
+          ],
+          if (trailingIcon != null)
+            Icon(trailingIcon, size: 18, color: const Color(0xFF94A3B8)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUserMenuHeader() {
+    return Row(
+      children: [
+        Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: const Color(0xFFF1F5F9),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: const Icon(
+            Icons.person_outline_rounded,
+            color: Color(0xFF94A3B8),
+            size: 26,
+          ),
+        ),
+        const SizedBox(width: 12),
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '未登录',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A2332),
+                ),
+              ),
+              SizedBox(height: 4),
+              Text(
+                '登录后可同步账号与订阅状态',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF94A3B8),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8FAFC),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: const Text(
+            '未注册',
+            style: TextStyle(
+              color: Color(0xFF94A3B8),
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMessageBadge() {
+    return Container(
+      width: 20,
+      height: 20,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        color: Color(0xFFE2E8F0),
+        shape: BoxShape.circle,
+      ),
+      child: const Text(
+        '2',
+        style: TextStyle(
+          color: Color(0xFF94A3B8),
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildUserAvatarTrigger() {
+    return Container(
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0F0F172A),
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          const Center(
+            child: Icon(
+              Icons.person_search_rounded,
+              color: Color(0xFF64748B),
+              size: 20,
+            ),
+          ),
+          Positioned(
+            right: 4,
+            bottom: 4,
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: const Color(0xFF10B981),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 1.4),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -292,6 +479,7 @@ class _ServerManagementDialogState extends State<_ServerManagementDialog> {
   final _passwordController = TextEditingController();
   final _noteController = TextEditingController();
   bool _isTesting = false;
+  bool _isSaving = false;
   bool _testSuccess = false;
   String _testMessage = '';
 
@@ -333,21 +521,36 @@ class _ServerManagementDialogState extends State<_ServerManagementDialog> {
     final sshManager = widget.provider.sshManager;
     final success = await sshManager.connect(testServer);
 
+    if (success) {
+      String detectedOs = '';
+      try {
+        final systemInfo = await sshManager.getSystemInfo();
+        detectedOs = systemInfo.osDisplayLabel;
+      } catch (_) {}
+      sshManager.disconnect();
+      setState(() {
+        _isTesting = false;
+        _testSuccess = true;
+        _testMessage = detectedOs.isEmpty ? '连接成功！' : '连接成功，已识别系统：$detectedOs';
+      });
+      return;
+    }
+
     setState(() {
       _isTesting = false;
-      if (success) {
-        _testSuccess = true;
-        _testMessage = '连接成功！';
-        sshManager.disconnect();
-      } else {
-        _testSuccess = false;
-        _testMessage = sshManager.errorMessage ?? '连接失败';
-      }
+      _testSuccess = false;
+      _testMessage = sshManager.errorMessage ?? '连接失败';
     });
   }
 
-  void _saveServer() {
-    if (!_formKey.currentState!.validate()) return;
+  Future<void> _saveServer() async {
+    if (_isSaving || !_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _isSaving = true;
+      _testSuccess = false;
+      _testMessage = '';
+    });
 
     final server = Server(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -363,10 +566,28 @@ class _ServerManagementDialogState extends State<_ServerManagementDialog> {
           .toList(),
     );
 
-    widget.provider.addServer(server);
-    widget.provider.selectServer(server);
-
-    Navigator.of(context).pop();
+    try {
+      await widget.provider.addServer(server);
+      if (!mounted) {
+        return;
+      }
+      unawaited(widget.provider.selectServer(server));
+      Navigator.of(context).pop();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _testSuccess = false;
+        _testMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
   }
 
   @override
@@ -537,7 +758,7 @@ class _ServerManagementDialogState extends State<_ServerManagementDialog> {
       children: [
         Expanded(
           child: TextButton(
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: _isTesting || _isSaving ? null : () => Navigator.of(context).pop(),
             style:
                 AppButtonStyles.text(
                   padding: const EdgeInsets.symmetric(vertical: 12),
@@ -552,7 +773,7 @@ class _ServerManagementDialogState extends State<_ServerManagementDialog> {
         const SizedBox(width: 12),
         Expanded(
           child: ElevatedButton(
-            onPressed: _isTesting ? null : _testConnection,
+            onPressed: _isTesting || _isSaving ? null : _testConnection,
             style: AppButtonStyles.warning(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
@@ -571,11 +792,20 @@ class _ServerManagementDialogState extends State<_ServerManagementDialog> {
         const SizedBox(width: 12),
         Expanded(
           child: ElevatedButton(
-            onPressed: _isTesting ? null : _saveServer,
+            onPressed: _isTesting || _isSaving ? null : () async => _saveServer(),
             style: AppButtonStyles.primary(
               padding: const EdgeInsets.symmetric(vertical: 12),
             ),
-            child: const Text('保存', style: TextStyle(color: Colors.white)),
+            child: _isSaving
+                ? const SizedBox(
+                    height: 16,
+                    width: 16,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Text('保存', style: TextStyle(color: Colors.white)),
           ),
         ),
       ],

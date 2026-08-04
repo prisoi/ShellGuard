@@ -129,6 +129,7 @@ class SshManager {
   final Queue<SshCommand> _commandQueue = Queue();
   bool _isProcessingQueue = false;
   Server? _currentServer;
+  SystemInfo? _systemInfoCache;
   final Map<String, StreamController<String>> _outputControllers = {};
   final Map<String, SSHSession> _activeExecutions = {};
 
@@ -159,6 +160,7 @@ class SshManager {
       await _client!.authenticated;
       _isConnected = true;
       _currentServer = server;
+      _systemInfoCache = null;
       _processQueue();
 
       return true;
@@ -182,6 +184,7 @@ class SshManager {
     }
     _isConnected = false;
     _currentServer = null;
+    _systemInfoCache = null;
     _commandQueue.clear();
     _isProcessingQueue = false;
     for (final session in _activeExecutions.values) {
@@ -217,18 +220,43 @@ class SshManager {
         onError: (e) {
           errorBuffer.write(e.toString());
         },
-        onDone: () {
-          if (errorBuffer.isNotEmpty) {
-            completer.completeError(errorBuffer.toString());
-          } else {
-            completer.complete(resultBuffer.toString());
-          }
+      );
+
+      session.stderr.listen(
+        (data) {
+          errorBuffer.write(utf8.decode(data));
         },
       );
 
-      session.stderr.listen((data) {
-        errorBuffer.write(utf8.decode(data));
-      });
+      unawaited(() async {
+        try {
+          await session.done;
+          final exitCode = await session.waitForExit(
+            timeout: const Duration(milliseconds: 200),
+          );
+          final stdoutText = resultBuffer.toString();
+          final stderrText = errorBuffer.toString().trim();
+          final combinedOutput = stderrText.isEmpty
+              ? stdoutText
+              : (stdoutText.trim().isEmpty ? stderrText : '$stdoutText\n$stderrText');
+          if (completer.isCompleted) {
+            return;
+          }
+          if (exitCode == null || exitCode == 0) {
+            completer.complete(combinedOutput);
+          } else {
+            completer.completeError(
+              combinedOutput.isEmpty
+                  ? 'Command exited with code $exitCode'
+                  : combinedOutput,
+            );
+          }
+        } catch (e) {
+          if (!completer.isCompleted) {
+            completer.completeError('Command execution failed: $e');
+          }
+        }
+      }());
 
       return await completer.future;
     } catch (e) {
@@ -596,11 +624,19 @@ class SshManager {
   }
 
   Future<SystemInfo> getSystemInfo() async {
-    final osInfoResult = await _executeCommandOrFallback(
-      """bash -lc 'if [ -f /etc/os-release ]; then . /etc/os-release && printf "%s\n" "\$PRETTY_NAME"; elif [ -f /etc/issue ]; then head -1 /etc/issue; else uname -a; fi'""",
-      'Unknown',
-      label: 'system-os-info',
+    final profileResult = await _executeCommandOrFallback(
+      """bash -lc 'if [ -r /etc/os-release ]; then . /etc/os-release; fi; printf "__OS_ID__|%s\n" "\${ID:-}"; printf "__OS_ID_LIKE__|%s\n" "\${ID_LIKE:-}"; printf "__OS_NAME__|%s\n" "\${NAME:-}"; printf "__OS_PRETTY__|%s\n" "\${PRETTY_NAME:-}"; printf "__OS_VERSION__|%s\n" "\${VERSION_ID:-}"; if command -v apt-get >/dev/null 2>&1; then echo "__CMD__|apt-get"; fi; if command -v dnf >/dev/null 2>&1; then echo "__CMD__|dnf"; fi; if command -v yum >/dev/null 2>&1; then echo "__CMD__|yum"; fi; if command -v zypper >/dev/null 2>&1; then echo "__CMD__|zypper"; fi; if command -v pacman >/dev/null 2>&1; then echo "__CMD__|pacman"; fi; if command -v apk >/dev/null 2>&1; then echo "__CMD__|apk"; fi; if command -v systemctl >/dev/null 2>&1; then echo "__CMD__|systemctl"; fi; if command -v service >/dev/null 2>&1; then echo "__CMD__|service"; fi; if command -v ufw >/dev/null 2>&1; then echo "__CMD__|ufw"; fi; if command -v firewall-cmd >/dev/null 2>&1; then echo "__CMD__|firewall-cmd"; fi; if command -v iptables >/dev/null 2>&1; then echo "__CMD__|iptables"; fi'""",
+      '',
+      label: 'system-profile',
     );
+    final profile = _parseSystemProfile(profileResult);
+    final osInfoResult = profile['osInfo']?.trim().isNotEmpty == true
+        ? profile['osInfo']!.trim()
+        : await _executeCommandOrFallback(
+            """bash -lc 'if [ -f /etc/issue ]; then head -1 /etc/issue; else uname -a; fi'""",
+            'Unknown',
+            label: 'system-os-info-fallback',
+          );
 
     final kernelResult = await _executeCommandOrFallback(
       'uname -r',
@@ -630,6 +666,13 @@ class SshManager {
 
     final info = SystemInfo(
       osInfo: osInfoResult.trim(),
+      osId: profile['osId'] ?? '',
+      osName: profile['osName'] ?? '',
+      osVersion: profile['osVersion'] ?? '',
+      osFamily: profile['osFamily'] ?? '',
+      packageManager: profile['packageManager'] ?? '',
+      serviceManager: profile['serviceManager'] ?? '',
+      firewallBackend: profile['firewallBackend'] ?? '',
       kernelVersion: kernelResult.trim(),
       uptime: uptimeResult.trim(),
       cpuCores: int.tryParse(cpuCoresResult.trim()) ?? 0,
@@ -637,7 +680,200 @@ class SshManager {
       diskTotal: diskResult.trim(),
     );
 
+    _systemInfoCache = info;
     return info;
+  }
+
+  Future<SystemInfo> _resolvePlatformInfo() async {
+    if (_systemInfoCache != null) {
+      return _systemInfoCache!;
+    }
+    final server = _currentServer;
+    if (server != null &&
+        ((server.packageManager?.trim().isNotEmpty ?? false) ||
+            (server.serviceManager?.trim().isNotEmpty ?? false) ||
+            (server.firewallBackend?.trim().isNotEmpty ?? false))) {
+      return SystemInfo(
+        osInfo: server.osInfo ?? 'Unknown',
+        osId: server.osId ?? '',
+        osName: server.osName ?? '',
+        osVersion: server.osVersion ?? '',
+        osFamily: server.osFamily ?? '',
+        packageManager: server.packageManager ?? '',
+        serviceManager: server.serviceManager ?? '',
+        firewallBackend: server.firewallBackend ?? '',
+        kernelVersion: server.kernelVersion ?? '',
+        uptime: server.uptime ?? '',
+        cpuCores: 0,
+        memoryTotal: '0',
+        diskTotal: '0',
+      );
+    }
+    return getSystemInfo();
+  }
+
+  Map<String, String> _parseSystemProfile(String raw) {
+    final values = <String, String>{};
+    final availableCommands = <String>[];
+    for (final line in raw.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty || !trimmed.contains('|')) {
+        continue;
+      }
+      final separatorIndex = trimmed.indexOf('|');
+      final key = trimmed.substring(0, separatorIndex);
+      final value = trimmed.substring(separatorIndex + 1).trim();
+      switch (key) {
+        case '__OS_ID__':
+          values['osId'] = value;
+          break;
+        case '__OS_ID_LIKE__':
+          values['idLike'] = value;
+          break;
+        case '__OS_NAME__':
+          values['osName'] = value;
+          break;
+        case '__OS_PRETTY__':
+          values['osInfo'] = value;
+          break;
+        case '__OS_VERSION__':
+          values['osVersion'] = value;
+          break;
+        case '__CMD__':
+          if (value.isNotEmpty) {
+            availableCommands.add(value);
+          }
+          break;
+      }
+    }
+    final osId = values['osId'] ?? '';
+    values['osFamily'] = LinuxPlatformSupport.detectFamily(
+      osId: osId,
+      osInfo: values['osInfo'] ?? values['osName'] ?? '',
+      idLike: values['idLike'] ?? '',
+    );
+    values['packageManager'] = LinuxPlatformSupport.detectPackageManager(
+      family: values['osFamily'] ?? 'linux',
+      availableCommands: availableCommands,
+    );
+    values['serviceManager'] = LinuxPlatformSupport.detectServiceManager(
+      availableCommands,
+    );
+    values['firewallBackend'] = LinuxPlatformSupport.detectFirewallBackend(
+      availableCommands,
+    );
+    return values;
+  }
+
+  Future<List<ServiceInfo>> _getSysvServiceList() async {
+    final result = await executeCommand(
+      """bash -lc '(service --status-all 2>/dev/null || chkconfig --list 2>/dev/null) | head -80'""",
+    );
+    final lines = result.trim().split('\n');
+    final services = <ServiceInfo>[];
+    for (final line in lines) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) {
+        continue;
+      }
+      final bracketMatch = RegExp(r'^\[\s*([+-?])\s*\]\s+(.+)$').firstMatch(trimmed);
+      if (bracketMatch != null) {
+        final statusToken = bracketMatch.group(1) ?? '?';
+        services.add(
+          ServiceInfo(
+            name: bracketMatch.group(2)?.trim() ?? trimmed,
+            status: statusToken == '+' ? 'running' : 'stopped',
+            isEnabled: statusToken == '+',
+            description: 'SysV service',
+          ),
+        );
+        continue;
+      }
+      final chkconfigMatch = RegExp(r'^(\S+)\s+0:(on|off)\s+1:(on|off)\s+2:(on|off)\s+3:(on|off)\s+4:(on|off)\s+5:(on|off)\s+6:(on|off)').firstMatch(trimmed);
+      if (chkconfigMatch != null) {
+        services.add(
+          ServiceInfo(
+            name: chkconfigMatch.group(1) ?? trimmed,
+            status: 'unknown',
+            isEnabled: (chkconfigMatch.group(5) ?? 'off') == 'on',
+            description: 'SysV service',
+          ),
+        );
+      }
+    }
+    return services;
+  }
+
+  Future<List<FirewallRule>> _getFirewalldRules() async {
+    final portsResult = await executePrivilegedCommand('firewall-cmd --list-ports 2>/dev/null || true');
+    final richRulesResult = await executePrivilegedCommand('firewall-cmd --list-rich-rules 2>/dev/null || true');
+    final rules = <FirewallRule>[];
+    for (final token in portsResult.split(RegExp(r'\s+'))) {
+      final trimmed = token.trim();
+      if (trimmed.isEmpty || !trimmed.contains('/')) {
+        continue;
+      }
+      final parts = trimmed.split('/');
+      rules.add(
+        FirewallRule(
+          id: 'port:$trimmed',
+          action: 'ALLOW',
+          protocol: parts.length > 1 ? parts[1].toUpperCase() : 'TCP',
+          source: null,
+          destination: null,
+          port: parts.first,
+        ),
+      );
+    }
+    for (final line in richRulesResult.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) {
+        continue;
+      }
+      final sourceMatch = RegExp(r'source address="([^"]+)"').firstMatch(trimmed);
+      final portMatch = RegExp(r'port port="([^"]+)"').firstMatch(trimmed);
+      final protocolMatch = RegExp(r'protocol="([^"]+)"').firstMatch(trimmed);
+      final action = trimmed.contains('reject') || trimmed.contains('drop')
+          ? 'DENY'
+          : 'ALLOW';
+      rules.add(
+        FirewallRule(
+          id: 'rich:${trimmed.hashCode}',
+          action: action,
+          protocol: (protocolMatch?.group(1) ?? 'ALL').toUpperCase(),
+          source: sourceMatch?.group(1),
+          destination: null,
+          port: portMatch?.group(1),
+        ),
+      );
+    }
+    return rules;
+  }
+
+  Future<List<FirewallRule>> _getIptablesRules() async {
+    final result = await executePrivilegedCommand('iptables -S INPUT 2>/dev/null || true');
+    final rules = <FirewallRule>[];
+    for (final line in result.split('\n')) {
+      final trimmed = line.trim();
+      if (!trimmed.startsWith('-A ')) {
+        continue;
+      }
+      final actionMatch = RegExp(r'-j\s+(\S+)').firstMatch(trimmed);
+      final protocolMatch = RegExp(r'-p\s+(\S+)').firstMatch(trimmed);
+      final sourceMatch = RegExp(r'-s\s+(\S+)').firstMatch(trimmed);
+      final portMatch = RegExp(r'--dport\s+(\S+)').firstMatch(trimmed);
+      rules.add(
+        FirewallRule(
+          id: 'iptables:${trimmed.hashCode}',
+          action: (actionMatch?.group(1) ?? 'ALLOW').toUpperCase(),
+          protocol: (protocolMatch?.group(1) ?? 'ALL').toUpperCase(),
+          source: sourceMatch?.group(1),
+          destination: null,
+          port: portMatch?.group(1),
+        ),
+      );
+    }
+    return rules;
   }
 
   Future<ResourceUsage> getResourceUsage() async {
@@ -678,6 +914,7 @@ class SshManager {
       '0',
       label: 'resource-connections',
     );
+    final gpuDevices = await _collectGpuDevices();
 
     final cpuUsage = double.tryParse(cpuResult.trim()) ?? 0.0;
 
@@ -721,6 +958,7 @@ class SshManager {
       networkUpload: _formatBytes(uploadBytes),
       networkDownload: _formatBytes(downloadBytes),
       activeConnections: int.tryParse(connectionsResult.trim()) ?? 0,
+      gpuDevices: gpuDevices,
     );
 
     return usage;
@@ -783,6 +1021,116 @@ class SshManager {
         ? 1
         : 2;
     return '${value.toStringAsFixed(fractionDigits)} ${units[unitIndex]}';
+  }
+
+  String _formatMegaBytes(num valueInMb) {
+    final valueInGb = valueInMb / 1024.0;
+    if (valueInGb >= 100) {
+      return '${valueInGb.toStringAsFixed(0)} GiB';
+    }
+    if (valueInGb >= 10) {
+      return '${valueInGb.toStringAsFixed(1)} GiB';
+    }
+    return '${valueInGb.toStringAsFixed(2)} GiB';
+  }
+
+  Future<List<GpuDeviceUsage>> _collectGpuDevices() async {
+    final nvidiaRaw = await _executeCommandOrFallback(
+      "bash -lc 'if command -v nvidia-smi >/dev/null 2>&1; then "
+          "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu "
+          "--format=csv,noheader,nounits 2>/dev/null; fi'",
+      '',
+      label: 'resource-gpu-nvidia',
+    );
+    final nvidiaDevices = _parseNvidiaGpuDevices(nvidiaRaw);
+    if (nvidiaDevices.isNotEmpty) {
+      return nvidiaDevices;
+    }
+
+    final inventoryRaw = await _executeCommandOrFallback(
+      "bash -lc 'if command -v lspci >/dev/null 2>&1; then "
+          "lspci | grep -Ei \"VGA compatible controller|3D controller|Display controller\"; fi'",
+      '',
+      label: 'resource-gpu-inventory',
+    );
+    return _parseGenericGpuInventory(inventoryRaw);
+  }
+
+  List<GpuDeviceUsage> _parseNvidiaGpuDevices(String raw) {
+    final devices = <GpuDeviceUsage>[];
+    for (final line in raw.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) {
+        continue;
+      }
+      final parts = trimmed.split(',');
+      if (parts.length < 6) {
+        continue;
+      }
+      final index = int.tryParse(parts[0].trim()) ?? devices.length;
+      final name = parts[1].trim();
+      final utilization = double.tryParse(parts[2].trim()) ?? 0.0;
+      final memoryUsedMb = double.tryParse(parts[3].trim()) ?? 0.0;
+      final memoryTotalMb = double.tryParse(parts[4].trim()) ?? 0.0;
+      final memoryPercent = memoryTotalMb > 0
+          ? (memoryUsedMb / memoryTotalMb * 100.0)
+          : 0.0;
+      final temperature = parts[5].trim().isEmpty ? null : '${parts[5].trim()} C';
+      devices.add(
+        GpuDeviceUsage(
+          index: index,
+          vendor: 'nvidia',
+          name: name,
+          utilizationPercent: utilization.clamp(0.0, 100.0),
+          memoryUsed: _formatMegaBytes(memoryUsedMb),
+          memoryTotal: _formatMegaBytes(memoryTotalMb),
+          memoryPercent: memoryPercent.clamp(0.0, 100.0),
+          temperature: temperature,
+        ),
+      );
+    }
+    return devices;
+  }
+
+  List<GpuDeviceUsage> _parseGenericGpuInventory(String raw) {
+    final devices = <GpuDeviceUsage>[];
+    var index = 0;
+    for (final line in raw.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) {
+        continue;
+      }
+      final lower = trimmed.toLowerCase();
+      String vendor;
+      if (lower.contains('nvidia')) {
+        vendor = 'nvidia';
+      } else if (lower.contains('intel')) {
+        vendor = 'intel';
+      } else if (lower.contains('amd') || lower.contains('advanced micro devices')) {
+        vendor = 'amd';
+      } else {
+        vendor = 'unknown';
+      }
+      final name = trimmed.contains(':')
+          ? trimmed.substring(trimmed.indexOf(':') + 1).trim()
+          : trimmed;
+      devices.add(
+        GpuDeviceUsage(
+          index: index,
+          vendor: vendor,
+          name: name,
+          utilizationPercent: 0,
+          memoryUsed: '--',
+          memoryTotal: vendor == 'intel' ? '共享内存' : '--',
+          memoryPercent: 0,
+          note: vendor == 'intel'
+              ? '已识别 Intel GPU；当前未检测到可读取显存占用的工具'
+              : '已识别 GPU 设备；当前未检测到可读取实时显存占用的工具',
+        ),
+      );
+      index++;
+    }
+    return devices;
   }
 
   Future<List<ProcessInfo>> getProcessList() async {
@@ -856,9 +1204,14 @@ class SshManager {
   }
 
   Future<List<FirewallRule>> getFirewallRules() async {
-    final result = await executePrivilegedCommand(
-      'ufw status numbered 2>/dev/null',
-    );
+    final systemInfo = await _resolvePlatformInfo();
+    if (systemInfo.firewallBackend == 'firewalld') {
+      return _getFirewalldRules();
+    }
+    if (systemInfo.firewallBackend == 'iptables') {
+      return _getIptablesRules();
+    }
+    final result = await executePrivilegedCommand('ufw status numbered 2>/dev/null');
 
     final lines = result.trim().split('\n');
     final rules = <FirewallRule>[];
@@ -904,10 +1257,22 @@ class SshManager {
   }
 
   Future<bool> getFirewallEnabled() async {
-    final result = await executePrivilegedCommand(
-      'ufw status 2>/dev/null | grep -i status',
-    );
-    return result.toLowerCase().contains('active');
+    final systemInfo = await _resolvePlatformInfo();
+    switch (systemInfo.firewallBackend) {
+      case 'firewalld':
+        final result = await executePrivilegedCommand('firewall-cmd --state 2>/dev/null || true');
+        return result.toLowerCase().contains('running');
+      case 'iptables':
+        final result = await executePrivilegedCommand('iptables -S 2>/dev/null || true');
+        return result.trim().isNotEmpty;
+      case 'none':
+        return false;
+      default:
+        final result = await executePrivilegedCommand(
+          'ufw status 2>/dev/null | grep -i status',
+        );
+        return result.toLowerCase().contains('active');
+    }
   }
 
   Future<String> manageFirewall({
@@ -918,57 +1283,40 @@ class SshManager {
     String? ruleNumber,
     String? ruleAction,
   }) async {
-    final normalizedPort = port?.trim();
-    final normalizedProtocol = protocol?.trim().toLowerCase();
-    final normalizedSource = source?.trim();
-    final ruleVerb = ruleAction?.trim().toLowerCase() ?? 'allow';
-    String command = 'sudo ufw ';
-
-    String buildRuleCommand(String verb) {
-      if (normalizedSource != null && normalizedSource.isNotEmpty) {
-        if (normalizedPort != null && normalizedPort.isNotEmpty) {
-          return '$verb from $normalizedSource to any port $normalizedPort'
-              '${normalizedProtocol == null || normalizedProtocol.isEmpty ? '' : ' proto $normalizedProtocol'}';
-        }
-        return '$verb from $normalizedSource';
-      }
-      if (normalizedPort != null && normalizedPort.isNotEmpty) {
-        return '$verb $normalizedPort/${normalizedProtocol ?? 'tcp'}';
-      }
-      throw Exception('Firewall rule requires port or source');
-    }
-
-    switch (action) {
-      case 'enable':
-        command += 'enable';
+    final systemInfo = await _resolvePlatformInfo();
+    late final String command;
+    switch (systemInfo.firewallBackend) {
+      case 'firewalld':
+        command = LinuxPlatformSupport.buildFirewalldCommand(
+          action: action,
+          port: port,
+          protocol: protocol,
+          source: source,
+          ruleAction: ruleAction,
+        );
         break;
-      case 'disable':
-        command += 'disable';
-        break;
-      case 'allow':
-        command += buildRuleCommand('allow');
-        break;
-      case 'deny':
-        command += buildRuleCommand('deny');
-        break;
-      case 'delete':
-        if (ruleNumber != null) {
-          command += '--force delete $ruleNumber';
-        } else {
-          command += 'delete ${buildRuleCommand(ruleVerb)}';
-        }
-        break;
-      case 'reset':
-        command += 'reset';
-        break;
+      case 'ufw':
+      case 'none':
+      case 'iptables':
       default:
-        return 'Unknown action';
+        command = LinuxPlatformSupport.buildUfwCommand(
+          action: action,
+          port: port,
+          protocol: protocol,
+          source: source,
+          ruleNumber: ruleNumber,
+          ruleAction: ruleAction,
+        );
+        break;
     }
-
-    return await executePrivilegedCommand(command.replaceFirst('sudo ', ''));
+    return await executePrivilegedCommand(command);
   }
 
   Future<List<ServiceInfo>> getServiceList() async {
+    final systemInfo = await _resolvePlatformInfo();
+    if (systemInfo.serviceManager != 'systemd') {
+      return _getSysvServiceList();
+    }
     final result = await executeCommand(
       """bash -lc 'systemctl list-units --type=service --all --no-pager --no-legend 2>/dev/null | head -80 | while read -r unit load active sub description; do enabled=\$(systemctl is-enabled "\$unit" 2>/dev/null || echo disabled); echo "\$unit|\$active|\$enabled|\$description"; done'""",
     );
@@ -1001,13 +1349,23 @@ class SshManager {
     required String serviceName,
     required String action,
   }) async {
-    final command = 'sudo systemctl $action $serviceName.service';
-    return await executePrivilegedCommand(command.replaceFirst('sudo ', ''));
+    final systemInfo = await _resolvePlatformInfo();
+    final command = LinuxPlatformSupport.buildServiceCommand(
+      serviceManager: systemInfo.serviceManager,
+      serviceName: serviceName,
+      action: action,
+    );
+    return await executePrivilegedCommand(command);
   }
 
   Future<String> getServiceLogs(String serviceName, {int lines = 80}) async {
+    final systemInfo = await _resolvePlatformInfo();
     return executePrivilegedCommand(
-      'journalctl -u $serviceName.service -n $lines --no-pager 2>/dev/null',
+      LinuxPlatformSupport.buildServiceLogCommand(
+        serviceManager: systemInfo.serviceManager,
+        serviceName: serviceName,
+        lines: lines,
+      ),
     );
   }
 
@@ -1019,6 +1377,10 @@ class SshManager {
     String? arguments,
     String? logPath,
   }) async {
+    final systemInfo = await _resolvePlatformInfo();
+    if (systemInfo.serviceManager != 'systemd') {
+      throw Exception('当前服务器未检测到 systemd，暂不支持自动创建托管服务');
+    }
     final safeServiceName = serviceName.trim().replaceAll(
       RegExp(r'[^a-zA-Z0-9_-]'),
       '_',
@@ -1357,13 +1719,47 @@ WantedBy=multi-user.target
   }
 
   Future<String> installTool(String toolName) async {
-    final command = 'sudo apt update && sudo apt install -y $toolName';
-    return await executeCommand(command);
+    final systemInfo = await _resolvePlatformInfo();
+    final command = LinuxPlatformSupport.buildInstallCommand(
+      packageManager: systemInfo.packageManager,
+      toolName: toolName,
+    );
+    return await executePrivilegedCommand(command);
   }
 
   Future<bool> checkToolInstalled(String toolName) async {
-    final result = await executeCommand('which $toolName 2>/dev/null');
-    return result.trim().isNotEmpty;
+    String command;
+    switch (toolName) {
+      case 'net-tools':
+        command =
+            "sh -lc 'if command -v ifconfig >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then echo installed; fi'";
+        break;
+      case 'iproute2':
+        command =
+            "sh -lc 'if command -v ip >/dev/null 2>&1; then echo installed; fi'";
+        break;
+      case 'pip':
+        command =
+            "sh -lc 'if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then echo installed; fi'";
+        break;
+      case 'nodejs':
+        command =
+            "sh -lc 'if command -v node >/dev/null 2>&1 || command -v nodejs >/dev/null 2>&1; then echo installed; fi'";
+        break;
+      case 'ufw':
+        command =
+            "sh -lc 'if command -v ufw >/dev/null 2>&1 || command -v firewall-cmd >/dev/null 2>&1; then echo installed; fi'";
+        break;
+      case 'uv':
+        command =
+            "sh -lc 'if command -v uv >/dev/null 2>&1 || [ -x \"\$HOME/.local/bin/uv\" ]; then echo installed; fi'";
+        break;
+      default:
+        command =
+            "sh -lc 'if command -v $toolName >/dev/null 2>&1; then echo installed; fi'";
+    }
+    final result = await executeCommand(command);
+    return result.trim().contains('installed');
   }
 
   void _processQueue() async {

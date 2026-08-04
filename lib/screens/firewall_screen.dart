@@ -342,6 +342,8 @@ class FirewallScreenState extends State<FirewallScreen> {
       estimatedReservedHeight: 290,
       minBodyHeight: 220,
       header: [
+        _buildTopBar(provider),
+        const SizedBox(height: 16),
         _buildFirewallToggle(provider),
         const SizedBox(height: 16),
         _buildAddRuleForm(provider),
@@ -349,6 +351,40 @@ class FirewallScreenState extends State<FirewallScreen> {
       ],
       body: _buildRulesTable(),
       footer: [const SizedBox(height: 16), _buildResetButton()],
+    );
+  }
+
+  Widget _buildTopBar(AppProvider provider) {
+    return Row(
+      children: [
+        const Expanded(
+          child: Text(
+            '防火墙规则支持手动刷新与实时开关操作',
+            style: TextStyle(
+              fontSize: 13,
+              color: Color(0xFF6B7C93),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        const SizedBox(width: 16),
+        ElevatedButton(
+          onPressed: provider.selectedServer == null ? null : refresh,
+          style: AppButtonStyles.primary(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+          ),
+          child: _isLoading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                )
+              : const Text('刷新防火墙'),
+        ),
+      ],
     );
   }
 
@@ -624,12 +660,14 @@ class FirewallScreenState extends State<FirewallScreen> {
                         ),
                       ),
                       Expanded(
-                        child: GestureDetector(
-                          onTap: () => _deleteRule(rule),
-                          child: const Icon(
-                            Icons.delete,
-                            color: Color(0xFFef4444),
-                            size: 18,
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: AppIconActionButton(
+                            icon: Icons.delete_outline,
+                            tooltip: '删除规则',
+                            onPressed: _isLoading ? null : () => _deleteRule(rule),
+                            foregroundColor: const Color(0xFFef4444),
+                            backgroundColor: const Color(0xFFfef2f2),
                           ),
                         ),
                       ),

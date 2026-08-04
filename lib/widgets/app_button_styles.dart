@@ -182,6 +182,57 @@ class AppButtonStyles {
   }
 }
 
+class AppIconActionButton extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final Color foregroundColor;
+  final Color backgroundColor;
+  final double iconSize;
+
+  const AppIconActionButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.foregroundColor = AppColors.textMuted,
+    this.backgroundColor = Colors.transparent,
+    this.iconSize = 16,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 30, height: 30),
+      style: IconButton.styleFrom(
+        backgroundColor: backgroundColor,
+        foregroundColor: foregroundColor,
+        disabledBackgroundColor: AppColors.disabledBackground,
+        disabledForegroundColor: AppColors.disabledForeground,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
+      ).copyWith(
+        overlayColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.pressed)) {
+            return foregroundColor.withValues(alpha: 0.18);
+          }
+          if (states.contains(WidgetState.hovered) ||
+              states.contains(WidgetState.focused)) {
+            return foregroundColor.withValues(alpha: 0.10);
+          }
+          return null;
+        }),
+      ),
+      icon: Icon(icon, size: iconSize),
+    );
+  }
+}
+
 class AppFieldStyles {
   static BoxDecoration toolbarDecoration({
     Color backgroundColor = Colors.white,

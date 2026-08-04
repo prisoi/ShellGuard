@@ -127,9 +127,16 @@ class AppProvider extends ChangeNotifier {
   StorageService get storageService => _storageService;
   CacheData? get currentCache => _currentCache;
   List<String> get groups => _groups;
-  bool get canAddMoreServers => _servers.length < freeServerLimit;
+  int get importedSharedServerCount => _sharedGroups.fold(
+    0,
+    (total, group) => total + group.servers.length,
+  );
+  int get totalManagedServerCount => _servers.length + importedSharedServerCount;
+  int get remainingServerQuota => freeServerLimit - totalManagedServerCount;
+  bool get canAddMoreServers => remainingServerQuota > 0;
   String get currentScreen => _currentScreen;
   List<LlmProviderConfig> get llmProviders => _llmProviders;
+  SystemInfo? get currentSystemInfo => _currentCache?.systemInfo;
   List<AiSessionRecord> get aiSessions => _aiSessions;
   String? get activeAiSessionId => _activeAiSessionId;
   List<AiMessageRecord> get activeAiMessages => _activeAiSessionId == null
@@ -183,7 +190,7 @@ class AppProvider extends ChangeNotifier {
         ServerSelectionOption(
           id: server.id,
           title: server.name,
-          subtitle: server.ip,
+          subtitle: '${server.ip} · ${server.osDisplayLabel}',
           isLocal: true,
           isOnline: server.isOnline,
         ),
@@ -196,7 +203,8 @@ class AppProvider extends ChangeNotifier {
           ServerSelectionOption(
             id: display.id,
             title: display.name,
-            subtitle: '${group.displayName} @ ${group.sourceHostIp}:${group.sourcePort}',
+            subtitle:
+                '${group.displayName} @ ${group.sourceHostIp}:${group.sourcePort} · ${display.osDisplayLabel}',
             isLocal: false,
             isOnline: _sharedConnected && _selectedSharedServer?.id == server.id,
           ),
@@ -254,18 +262,28 @@ class AppProvider extends ChangeNotifier {
 
   Future<void> addServer(Server server) async {
     if (!canAddMoreServers) {
-      _errorMessage = '个人免费版最多支持 10 台服务器';
+      _errorMessage =
+          '个人免费版最多支持 10 台服务器（本地 ${_servers.length} 台，共享 $importedSharedServerCount 台）';
       notifyListeners();
-      return;
+      throw Exception(_errorMessage);
+    }
+    final duplicate = _findDuplicateServer(server);
+    if (duplicate != null) {
+      throw Exception('已存在相同服务器：${duplicate.name}（${duplicate.ip} / ${duplicate.username}）');
     }
 
     _servers.add(server);
     await _storageService.saveServers(_servers);
     await _ensureGroupExists(server.group);
     notifyListeners();
+    unawaited(_detectAndPersistServerPlatform(server.id));
   }
 
   Future<void> updateServer(Server updatedServer) async {
+    final duplicate = _findDuplicateServer(updatedServer, ignoreId: updatedServer.id);
+    if (duplicate != null) {
+      throw Exception('已存在相同服务器：${duplicate.name}（${duplicate.ip} / ${duplicate.username}）');
+    }
     final index = _servers.indexWhere((s) => s.id == updatedServer.id);
     if (index != -1) {
       _servers[index] = updatedServer;
@@ -274,6 +292,9 @@ class AppProvider extends ChangeNotifier {
       }
       await _storageService.saveServers(_servers);
       await _ensureGroupExists(updatedServer.group);
+      notifyListeners();
+      unawaited(_detectAndPersistServerPlatform(updatedServer.id));
+      return;
     }
     notifyListeners();
   }
@@ -298,12 +319,9 @@ class AppProvider extends ChangeNotifier {
     _sharedConnected = false;
     _activeAiSessionId = null;
     _sshEngine.rememberServer(server);
-    await _storageService.saveSelectedServer(server.id);
-    await _storageService.addUsageEvent(serverId: server.id, pageKey: 'server_switch');
-    _currentCache = await _cacheService.getCache(server.id);
-    await _loadAiSessions(notify: false);
+    _currentCache = _cacheService.getCacheSync(server.id);
     notifyListeners();
-    await requestRefreshIfStale(_scopeForCurrentScreen(), reason: 'server-switch');
+    unawaited(_completeLocalServerSelection(server.id));
   }
 
   Future<void> selectServerById(String selectionId) async {
@@ -330,21 +348,10 @@ class AppProvider extends ChangeNotifier {
     _selectedServer = null;
     _sharedConnected = false;
     _activeAiSessionId = null;
-    await _storageService.saveSelectedServer(_sharedSelectionDisplayId(group, server));
-    _currentCache = await _cacheService.getCache(
-      _sharedSelectionDisplayId(group, server),
-    );
-    await _loadAiSessions(notify: false);
+    final selectedId = _sharedSelectionDisplayId(group, server);
+    _currentCache = _cacheService.getCacheSync(selectedId);
     notifyListeners();
-    try {
-      await requestRefreshIfStale(
-        _scopeForCurrentScreen(),
-        reason: 'shared-server-switch',
-      );
-    } catch (_) {
-      // Shared selection can be imported before the source listener is reachable.
-      // Keep the selection but avoid surfacing an uncaught async framework error.
-    }
+    unawaited(_completeSharedServerSelection(group, server));
   }
 
   Future<bool> connectToServer() async {
@@ -510,6 +517,73 @@ class AppProvider extends ChangeNotifier {
       await _storageService.saveGroups(_groups);
       notifyListeners();
     }
+  }
+
+  Future<void> renameGroup({
+    required String oldName,
+    required String newName,
+  }) async {
+    final normalizedOld = oldName.trim();
+    final normalizedNew = newName.trim();
+    if (normalizedOld.isEmpty || normalizedNew.isEmpty) {
+      throw Exception('分组名称不能为空');
+    }
+    if (normalizedOld == '默认分组') {
+      throw Exception('默认分组不支持重命名');
+    }
+    if (!_groups.contains(normalizedOld)) {
+      throw Exception('分组不存在');
+    }
+    if (_groups.contains(normalizedNew) && normalizedNew != normalizedOld) {
+      throw Exception('分组名称已存在');
+    }
+
+    _groups = _groups.map((group) {
+      return group == normalizedOld ? normalizedNew : group;
+    }).toList();
+    _servers = _servers.map((server) {
+      return server.group == normalizedOld
+          ? server.copyWith(group: normalizedNew)
+          : server;
+    }).toList();
+    if (_selectedServer != null && _selectedServer!.group == normalizedOld) {
+      final index = _servers.indexWhere((server) => server.id == _selectedServer!.id);
+      if (index != -1) {
+        _selectedServer = _servers[index];
+      }
+    }
+    await _storageService.saveServers(_servers);
+    await _storageService.saveGroups(_groups);
+    notifyListeners();
+  }
+
+  Future<void> deleteGroup(String groupName) async {
+    final normalizedName = groupName.trim();
+    if (normalizedName.isEmpty) {
+      throw Exception('分组名称不能为空');
+    }
+    if (normalizedName == '默认分组') {
+      throw Exception('默认分组不支持删除');
+    }
+    if (!_groups.contains(normalizedName)) {
+      throw Exception('分组不存在');
+    }
+
+    _groups.removeWhere((group) => group == normalizedName);
+    _servers = _servers.map((server) {
+      return server.group == normalizedName
+          ? server.copyWith(group: '默认分组')
+          : server;
+    }).toList();
+    if (_selectedServer != null && _selectedServer!.group == normalizedName) {
+      final index = _servers.indexWhere((server) => server.id == _selectedServer!.id);
+      if (index != -1) {
+        _selectedServer = _servers[index];
+      }
+    }
+    await _storageService.saveServers(_servers);
+    await _storageService.saveGroups(_groups);
+    notifyListeners();
   }
 
   Future<void> saveOperationLog({
@@ -1142,6 +1216,16 @@ class AppProvider extends ChangeNotifier {
     required String filePath,
     String? displayNameOverride,
   }) async {
+    final payload = await _storageService.readSharedGroupImportPayload(
+      filePath: filePath,
+    );
+    final nextTotal = totalManagedServerCount + payload.servers.length;
+    if (nextTotal > freeServerLimit) {
+      throw Exception(
+        '导入失败：当前已有 $totalManagedServerCount 台资源（本地 ${_servers.length} 台，共享 $importedSharedServerCount 台），'
+        '该共享组包含 ${payload.servers.length} 台，导入后会超过免费版上限 10 台',
+      );
+    }
     final group = await _storageService.importSharedGroupFromJson(
       filePath: filePath,
       displayNameOverride: displayNameOverride,
@@ -1229,6 +1313,7 @@ class AppProvider extends ChangeNotifier {
         userShell: userShell,
       );
     }
+    await _ensureSelectedLocalManagerConnected();
     if (privileged) {
       return _sshManager.executePrivilegedCommand(command);
     }
@@ -1309,8 +1394,13 @@ class AppProvider extends ChangeNotifier {
     if (!isSharedSelection) {
       return _sshManager.manageService(serviceName: serviceName, action: action);
     }
+    final serviceManager = _effectiveServiceManager();
     return executeSelectedCommand(
-      'systemctl $action $serviceName.service',
+      LinuxPlatformSupport.buildServiceCommand(
+        serviceManager: serviceManager,
+        serviceName: serviceName,
+        action: action,
+      ),
       privileged: true,
     );
   }
@@ -1319,8 +1409,13 @@ class AppProvider extends ChangeNotifier {
     if (!isSharedSelection) {
       return _sshManager.getServiceLogs(serviceName, lines: lines);
     }
+    final serviceManager = _effectiveServiceManager();
     return executeSelectedCommand(
-      'journalctl -u $serviceName.service -n $lines --no-pager 2>/dev/null',
+      LinuxPlatformSupport.buildServiceLogCommand(
+        serviceManager: serviceManager,
+        serviceName: serviceName,
+        lines: lines,
+      ),
       privileged: true,
     );
   }
@@ -1342,6 +1437,9 @@ class AppProvider extends ChangeNotifier {
         arguments: arguments,
         logPath: logPath,
       );
+    }
+    if (_effectiveServiceManager() != 'systemd') {
+      throw Exception('当前共享服务器未检测到 systemd，暂不支持自动创建托管服务');
     }
     final safeServiceName = serviceName.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
     final execLine = arguments == null || arguments.trim().isEmpty
@@ -1406,50 +1504,136 @@ WantedBy=multi-user.target
         ruleAction: ruleAction,
       );
     }
-    final normalizedPort = port?.trim();
-    final normalizedProtocol = protocol?.trim().toLowerCase();
-    final normalizedSource = source?.trim();
-    final ruleVerb = ruleAction?.trim().toLowerCase() ?? 'allow';
-    String command = 'ufw ';
-    String buildRuleCommand(String verb) {
-      if (normalizedSource != null && normalizedSource.isNotEmpty) {
-        if (normalizedPort != null && normalizedPort.isNotEmpty) {
-          return '$verb from $normalizedSource to any port $normalizedPort${normalizedProtocol == null || normalizedProtocol.isEmpty ? '' : ' proto $normalizedProtocol'}';
-        }
-        return '$verb from $normalizedSource';
-      }
-      if (normalizedPort != null && normalizedPort.isNotEmpty) {
-        return '$verb $normalizedPort/${normalizedProtocol ?? 'tcp'}';
-      }
-      throw Exception('Firewall rule requires port or source');
-    }
-    switch (action) {
-      case 'enable':
-        command += 'enable';
-        break;
-      case 'disable':
-        command += 'disable';
-        break;
-      case 'allow':
-        command += buildRuleCommand('allow');
-        break;
-      case 'deny':
-        command += buildRuleCommand('deny');
-        break;
-      case 'delete':
-        if (ruleNumber != null) {
-          command += '--force delete $ruleNumber';
-        } else {
-          command += 'delete ${buildRuleCommand(ruleVerb)}';
-        }
-        break;
-      case 'reset':
-        command += 'reset';
-        break;
-      default:
-        throw Exception('Unknown firewall action');
-    }
+    final firewallBackend = _effectiveFirewallBackend();
+    final command = firewallBackend == 'firewalld'
+        ? LinuxPlatformSupport.buildFirewalldCommand(
+            action: action,
+            port: port,
+            protocol: protocol,
+            source: source,
+            ruleAction: ruleAction,
+          )
+        : LinuxPlatformSupport.buildUfwCommand(
+            action: action,
+            port: port,
+            protocol: protocol,
+            source: source,
+            ruleNumber: ruleNumber,
+            ruleAction: ruleAction,
+          );
     return executeSelectedCommand(command, privileged: true);
+  }
+
+  String buildInstallToolCommand(String toolName) {
+    return LinuxPlatformSupport.buildInstallCommand(
+      packageManager: _effectivePackageManager(),
+      toolName: toolName,
+    );
+  }
+
+  String buildCheckToolCommand(String toolName) {
+    switch (toolName) {
+      case 'net-tools':
+        return "sh -lc 'if command -v ifconfig >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then echo installed; fi'";
+      case 'iproute2':
+        return "sh -lc 'if command -v ip >/dev/null 2>&1; then echo installed; fi'";
+      case 'pip':
+        return "sh -lc 'if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then echo installed; fi'";
+      case 'nodejs':
+        return "sh -lc 'if command -v node >/dev/null 2>&1 || command -v nodejs >/dev/null 2>&1; then echo installed; fi'";
+      case 'ufw':
+        return "sh -lc 'if command -v ufw >/dev/null 2>&1 || command -v firewall-cmd >/dev/null 2>&1; then echo installed; fi'";
+      case 'uv':
+        return "sh -lc 'if command -v uv >/dev/null 2>&1 || [ -x \"\$HOME/.local/bin/uv\" ]; then echo installed; fi'";
+      default:
+        return "sh -lc 'if command -v $toolName >/dev/null 2>&1; then echo installed; fi'";
+    }
+  }
+
+  Future<String> installToolSelected(String toolName) async {
+    final result = await executeSelectedCommand(
+      buildInstallToolCommand(toolName),
+      privileged: true,
+    );
+    final installed = await checkToolInstalledSelected(toolName);
+    await _persistInstalledToolsForSelected({toolName: installed});
+    return result;
+  }
+
+  Future<bool> checkToolInstalledSelected(String toolName) async {
+    final result = await executeSelectedCommand(buildCheckToolCommand(toolName));
+    return result.trim().contains('installed');
+  }
+
+  Map<String, bool> getSelectedInstalledToolsCache() {
+    return Map<String, bool>.from(_currentCache?.installedTools ?? const <String, bool>{});
+  }
+
+  Future<Map<String, bool>> scanInstalledToolsSelected(
+    Iterable<String> toolNames,
+  ) async {
+    final selected = selectedServer;
+    if (selected == null) {
+      throw Exception('请先选择服务器');
+    }
+
+    final results = <String, bool>{};
+    for (final toolName in toolNames) {
+      results[toolName] = await checkToolInstalledSelected(toolName);
+    }
+    await _persistInstalledToolsForSelected(results);
+    return results;
+  }
+
+  Future<void> persistInstalledToolScanSelected(
+    Map<String, bool> installedTools,
+  ) async {
+    await _persistInstalledToolsForSelected(installedTools);
+  }
+
+  Future<bool> _ensureSelectedLocalManagerConnected() async {
+    if (isSharedSelection) {
+      return true;
+    }
+    final selected = _selectedServer;
+    if (selected == null) {
+      throw Exception('No active server selected');
+    }
+    if (_sshManager.isConnected && _sshManager.currentServer?.id == selected.id) {
+      return true;
+    }
+    final success = await _sshManager.connect(selected);
+    if (!success) {
+      throw Exception(_sshManager.errorMessage ?? 'SSH connection not established');
+    }
+    return true;
+  }
+
+  Future<void> _persistInstalledToolsForSelected(
+    Map<String, bool> installedTools,
+  ) async {
+    final selected = selectedServer;
+    if (selected == null || installedTools.isEmpty) {
+      return;
+    }
+    final mergedInstalledTools = <String, bool>{
+      ...?_currentCache?.installedTools,
+      ...installedTools,
+    };
+    if (mergedInstalledTools.containsKey('docker')) {
+      await _storageService.upsertCapability(
+        serverId: selected.id,
+        dockerInstalled: mergedInstalledTools['docker'],
+        checkedAt: DateTime.now(),
+      );
+    }
+    await _cacheService.updateCache(
+      selected.id,
+      installedTools: mergedInstalledTools,
+    );
+    if (selectedServer?.id == selected.id) {
+      _currentCache = _cacheService.getCacheSync(selected.id);
+    }
   }
 
   Future<void> _refreshSharedScope(
@@ -1563,9 +1747,136 @@ WantedBy=multi-user.target
       group: group.displayName,
       isOnline: _selectedSharedServer?.id == server.id ? _sharedConnected : false,
       osInfo: cache?.systemInfo?.osInfo,
+      osId: cache?.systemInfo?.osId,
+      osName: cache?.systemInfo?.osName,
+      osVersion: cache?.systemInfo?.osVersion,
+      osFamily: cache?.systemInfo?.osFamily,
+      packageManager: cache?.systemInfo?.packageManager,
+      serviceManager: cache?.systemInfo?.serviceManager,
+      firewallBackend: cache?.systemInfo?.firewallBackend,
       kernelVersion: cache?.systemInfo?.kernelVersion,
       uptime: cache?.systemInfo?.uptime,
     );
+  }
+
+  String _effectivePackageManager() {
+    final selected = selectedServer;
+    return currentSystemInfo?.packageManager.isNotEmpty == true
+        ? currentSystemInfo!.packageManager
+        : (selected?.packageManager?.isNotEmpty == true ? selected!.packageManager! : 'apt');
+  }
+
+  String _effectiveServiceManager() {
+    final selected = selectedServer;
+    return currentSystemInfo?.serviceManager.isNotEmpty == true
+        ? currentSystemInfo!.serviceManager
+        : (selected?.serviceManager?.isNotEmpty == true ? selected!.serviceManager! : 'systemd');
+  }
+
+  String _effectiveFirewallBackend() {
+    final selected = selectedServer;
+    return currentSystemInfo?.firewallBackend.isNotEmpty == true
+        ? currentSystemInfo!.firewallBackend
+        : (selected?.firewallBackend?.isNotEmpty == true ? selected!.firewallBackend! : 'ufw');
+  }
+
+  Server? _findDuplicateServer(Server candidate, {String? ignoreId}) {
+    final normalizedIp = candidate.ip.trim().toLowerCase();
+    final normalizedUsername = candidate.username.trim().toLowerCase();
+    for (final server in _servers) {
+      if (ignoreId != null && server.id == ignoreId) {
+        continue;
+      }
+      if (server.ip.trim().toLowerCase() == normalizedIp &&
+          server.username.trim().toLowerCase() == normalizedUsername) {
+        return server;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _detectAndPersistServerPlatform(String serverId) async {
+    final index = _servers.indexWhere((server) => server.id == serverId);
+    if (index == -1) {
+      return;
+    }
+    final server = _servers[index];
+    final tempManager = SshManager();
+    try {
+      final connected = await tempManager.connect(server);
+      if (!connected) {
+        return;
+      }
+      final systemInfo = await tempManager.getSystemInfo();
+      final updatedServer = server.copyWith(
+        osInfo: systemInfo.osInfo,
+        osId: systemInfo.osId,
+        osName: systemInfo.osName,
+        osVersion: systemInfo.osVersion,
+        osFamily: systemInfo.osFamily,
+        packageManager: systemInfo.packageManager,
+        serviceManager: systemInfo.serviceManager,
+        firewallBackend: systemInfo.firewallBackend,
+        kernelVersion: systemInfo.kernelVersion,
+        uptime: systemInfo.uptime,
+      );
+      _servers[index] = updatedServer;
+      if (_selectedServer?.id == updatedServer.id) {
+        _selectedServer = updatedServer;
+      }
+      await _storageService.saveServers(_servers);
+      notifyListeners();
+    } catch (_) {
+    } finally {
+      tempManager.disconnect();
+    }
+  }
+
+  Future<void> _completeLocalServerSelection(String serverId) async {
+    try {
+      await _storageService.saveSelectedServer(serverId);
+      await _storageService.addUsageEvent(
+        serverId: serverId,
+        pageKey: 'server_switch',
+      );
+      final cache = await _cacheService.getCache(serverId);
+      if (_selectedServer?.id != serverId) {
+        return;
+      }
+      _currentCache = cache;
+      await _loadAiSessions(notify: false);
+      notifyListeners();
+      await requestRefreshIfStale(
+        _scopeForCurrentScreen(),
+        reason: 'server-switch',
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _completeSharedServerSelection(
+    SharedGroupRecord group,
+    SharedServerRecord server,
+  ) async {
+    final selectedId = _sharedSelectionDisplayId(group, server);
+    try {
+      await _storageService.saveSelectedServer(selectedId);
+      final cache = await _cacheService.getCache(selectedId);
+      if (_selectedSharedServer?.id != server.id ||
+          _selectedSharedGroup?.id != group.id) {
+        return;
+      }
+      _currentCache = cache;
+      await _loadAiSessions(notify: false);
+      notifyListeners();
+      try {
+        await requestRefreshIfStale(
+          _scopeForCurrentScreen(),
+          reason: 'shared-server-switch',
+        );
+      } catch (_) {
+        // Shared selection can be imported before the source listener is reachable.
+      }
+    } catch (_) {}
   }
 
   String _sharedSelectionDisplayId(

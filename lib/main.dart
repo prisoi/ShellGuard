@@ -136,35 +136,6 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  void _handleRefresh() {
-    switch (_currentScreen) {
-      case 'dashboard':
-        _dashboardKey.currentState?.refresh();
-        break;
-      case 'files':
-        _filesKey.currentState?.refresh();
-        break;
-      case 'ports':
-        _portsKey.currentState?.refresh();
-        break;
-      case 'processes':
-        _processesKey.currentState?.refresh();
-        break;
-      case 'services':
-        _servicesKey.currentState?.refresh();
-        break;
-      case 'docker':
-        _dockerKey.currentState?.refresh();
-        break;
-      case 'firewall':
-        _firewallKey.currentState?.refresh();
-        break;
-      case 'monitoring':
-        _monitoringKey.currentState?.refresh();
-        break;
-    }
-  }
-
   Future<void> _handleConnect() async {
     final provider = Provider.of<AppProvider>(context, listen: false);
     final connectSelectionId = provider.selectedServer?.id;
@@ -261,7 +232,6 @@ class _MainScreenState extends State<MainScreen> {
               children: [
                 TopBar(
                   title: _getScreenTitle(),
-                  onRefresh: _handleRefresh,
                   onConnect: _handleConnect,
                 ),
                 Expanded(
