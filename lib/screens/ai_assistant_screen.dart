@@ -763,7 +763,7 @@ class _AiAssistantScreenState extends State<AiAssistantScreen> {
   Widget _buildEmptyState() {
     final provider = Provider.of<AppProvider>(context, listen: false);
     final message = provider.isSharedSelection
-        ? '当前选中的是共享资源，AI 助力会话不会与本地服务器混用。若需要 AI 运维，请在源端直接发起。'
+        ? '当前会话将直接面向共享服务器执行命令，并把提问、步骤和执行结果写入本地与源端审计。'
         : '你可以点击左侧加号创建会话，也可以直接在下方输入需求开始第一轮对话。';
     return Container(
       width: double.infinity,

@@ -7,6 +7,13 @@ import '../models/server.dart';
 import 'llm_service.dart';
 import 'storage_service.dart';
 
+typedef AiAuditLogger = Future<void> Function({
+  required String action,
+  required String summary,
+  String detail,
+  bool success,
+});
+
 class AiSessionRuntimeSnapshot {
   final AiSessionRecord session;
   final List<AiMessageRecord> messages;
@@ -21,6 +28,191 @@ class AiSessionRuntimeSnapshot {
   });
 }
 
+class AiCommandChunk {
+  final String executionId;
+  final String text;
+  final bool isError;
+  final bool isDone;
+
+  const AiCommandChunk({
+    required this.executionId,
+    required this.text,
+    this.isError = false,
+    this.isDone = false,
+  });
+}
+
+class AiCommandResult {
+  final String stdout;
+  final String stderr;
+  final int? exitCode;
+  final bool interrupted;
+
+  const AiCommandResult({
+    required this.stdout,
+    required this.stderr,
+    required this.exitCode,
+    required this.interrupted,
+  });
+}
+
+class AiCommandExecutionHandle {
+  final String executionId;
+  final Stream<AiCommandChunk> stream;
+  final Future<AiCommandResult> result;
+
+  const AiCommandExecutionHandle({
+    required this.executionId,
+    required this.stream,
+    required this.result,
+  });
+}
+
+abstract class AiCommandExecutor {
+  Future<AiCommandExecutionHandle> executeUserCommandStream(String command);
+  Future<AiCommandExecutionHandle> executePrivilegedUserCommandStream(String command);
+  void interruptExecution(String executionId);
+}
+
+class LocalAiCommandExecutor implements AiCommandExecutor {
+  final SshManager manager;
+
+  const LocalAiCommandExecutor(this.manager);
+
+  @override
+  Future<AiCommandExecutionHandle> executeUserCommandStream(String command) async {
+    final handle = await manager.executeUserCommandStream(command);
+    return _wrap(handle);
+  }
+
+  @override
+  Future<AiCommandExecutionHandle> executePrivilegedUserCommandStream(String command) async {
+    final handle = await manager.executePrivilegedUserCommandStream(command);
+    return _wrap(handle);
+  }
+
+  @override
+  void interruptExecution(String executionId) {
+    manager.interruptExecution(executionId);
+  }
+
+  AiCommandExecutionHandle _wrap(SshExecutionHandle handle) {
+    return AiCommandExecutionHandle(
+      executionId: handle.executionId,
+      stream: handle.stream.map((chunk) {
+        return AiCommandChunk(
+          executionId: chunk.executionId,
+          text: chunk.text,
+          isError: chunk.isError,
+          isDone: chunk.isDone,
+        );
+      }),
+      result: handle.result.then((result) {
+        return AiCommandResult(
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          interrupted: result.interrupted,
+        );
+      }),
+    );
+  }
+}
+
+class SharedAiCommandExecutor implements AiCommandExecutor {
+  final Future<String> Function({
+    required String command,
+    required bool privileged,
+  }) runCommand;
+
+  const SharedAiCommandExecutor({
+    required this.runCommand,
+  });
+
+  @override
+  Future<AiCommandExecutionHandle> executeUserCommandStream(String command) {
+    return _run(command, privileged: false);
+  }
+
+  @override
+  Future<AiCommandExecutionHandle> executePrivilegedUserCommandStream(String command) {
+    return _run(command, privileged: true);
+  }
+
+  @override
+  void interruptExecution(String executionId) {}
+
+  Future<AiCommandExecutionHandle> _run(
+    String command, {
+    required bool privileged,
+  }) async {
+    final executionId = DateTime.now().microsecondsSinceEpoch.toString();
+    final controller = StreamController<AiCommandChunk>.broadcast();
+    final completer = Completer<AiCommandResult>();
+
+    unawaited(() async {
+      try {
+        final output = await runCommand(command: command, privileged: privileged);
+        if (output.isNotEmpty) {
+          controller.add(
+            AiCommandChunk(
+              executionId: executionId,
+              text: output,
+            ),
+          );
+        }
+        controller.add(
+          AiCommandChunk(
+            executionId: executionId,
+            text: '',
+            isDone: true,
+          ),
+        );
+        await controller.close();
+        completer.complete(
+          AiCommandResult(
+            stdout: output,
+            stderr: '',
+            exitCode: 0,
+            interrupted: false,
+          ),
+        );
+      } catch (error) {
+        final message = error.toString();
+        controller.add(
+          AiCommandChunk(
+            executionId: executionId,
+            text: message,
+            isError: true,
+          ),
+        );
+        controller.add(
+          AiCommandChunk(
+            executionId: executionId,
+            text: '',
+            isDone: true,
+          ),
+        );
+        await controller.close();
+        completer.complete(
+          AiCommandResult(
+            stdout: '',
+            stderr: message,
+            exitCode: 1,
+            interrupted: false,
+          ),
+        );
+      }
+    }());
+
+    return AiCommandExecutionHandle(
+      executionId: executionId,
+      stream: controller.stream,
+      result: completer.future,
+    );
+  }
+}
+
 class AiAssistantService {
   static const int _historyCompressionThreshold = 10;
   static const int _streamMaxChars = 8000;
@@ -31,9 +223,10 @@ class AiAssistantService {
 
   final Map<String, Completer<bool>> _confirmWaiters = {};
   final Map<String, AiSessionRuntimeSnapshot> _runtimeSessions = {};
-  final Map<String, SshManager> _sessionManagers = {};
+  final Map<String, AiCommandExecutor> _sessionExecutors = {};
   final Map<String, Server> _sessionServers = {};
   final Map<String, LlmProviderConfig> _sessionProviders = {};
+  final Map<String, AiAuditLogger> _sessionAuditLoggers = {};
 
   AiAssistantService(this._storageService, this._llmService);
 
@@ -41,9 +234,10 @@ class AiAssistantService {
 
   void removeRuntimeSession(String sessionId) {
     _runtimeSessions.remove(sessionId);
-    _sessionManagers.remove(sessionId);
+    _sessionExecutors.remove(sessionId);
     _sessionServers.remove(sessionId);
     _sessionProviders.remove(sessionId);
+    _sessionAuditLoggers.remove(sessionId);
     _confirmWaiters.removeWhere((key, _) => key.startsWith('$sessionId:'));
   }
 
@@ -53,7 +247,8 @@ class AiAssistantService {
     required Map<String, List<AiStepRecord>> stepsByMessageId,
     required Server server,
     required LlmProviderConfig provider,
-    required SshManager sshManager,
+    required AiCommandExecutor executor,
+    AiAuditLogger? auditLogger,
     required VoidCallback onChanged,
   }) async {
     _runtimeSessions[session.id] = AiSessionRuntimeSnapshot(
@@ -61,9 +256,12 @@ class AiAssistantService {
       messages: messages,
       stepsByMessageId: stepsByMessageId,
     );
-    _sessionManagers[session.id] = sshManager;
+    _sessionExecutors[session.id] = executor;
     _sessionServers[session.id] = server;
     _sessionProviders[session.id] = provider;
+    if (auditLogger != null) {
+      _sessionAuditLoggers[session.id] = auditLogger;
+    }
     onChanged();
   }
 
@@ -76,8 +274,9 @@ class AiAssistantService {
   Future<AiSessionRuntimeSnapshot> createSession({
     required Server server,
     required LlmProviderConfig provider,
-    required SshManager sshManager,
+    required AiCommandExecutor executor,
     String? initialPrompt,
+    AiAuditLogger? auditLogger,
     required VoidCallback onChanged,
   }) async {
     final sessionId = DateTime.now().microsecondsSinceEpoch.toString();
@@ -100,9 +299,18 @@ class AiAssistantService {
       messages: const [],
       stepsByMessageId: const {},
     );
-    _sessionManagers[sessionId] = sshManager;
+    _sessionExecutors[sessionId] = executor;
     _sessionServers[sessionId] = server;
     _sessionProviders[sessionId] = provider;
+    if (auditLogger != null) {
+      _sessionAuditLoggers[sessionId] = auditLogger;
+      await _logAiAudit(
+        sessionId,
+        action: 'create_session',
+        summary: session.title,
+        detail: 'server=${server.name}',
+      );
+    }
     onChanged();
 
     if (initialPrompt != null && initialPrompt.trim().isNotEmpty) {
@@ -124,8 +332,8 @@ class AiAssistantService {
     final snapshot = _runtimeSessions[sessionId];
     final server = _sessionServers[sessionId];
     final provider = _sessionProviders[sessionId];
-    final manager = _sessionManagers[sessionId];
-    if (snapshot == null || server == null || provider == null || manager == null) {
+    final executor = _sessionExecutors[sessionId];
+    if (snapshot == null || server == null || provider == null || executor == null) {
       throw Exception('会话不存在或运行环境未初始化');
     }
 
@@ -171,6 +379,12 @@ class AiAssistantService {
         assistantMessage,
       ],
       stepsByMessageId: Map<String, List<AiStepRecord>>.from(snapshot.stepsByMessageId),
+    );
+    await _logAiAudit(
+      sessionId,
+      action: 'user_prompt',
+      summary: prompt.trim(),
+      detail: 'server=${server.name}',
     );
     onChanged();
 
@@ -228,6 +442,7 @@ class AiAssistantService {
           sessionId: sessionId,
           assistantMessageId: assistantMessageId,
           prompt: prompt.trim(),
+          executor: executor,
           onChanged: onChanged,
         ),
       );
@@ -246,6 +461,13 @@ class AiAssistantService {
       );
       await _storageService.saveAiMessage(assistantMessage);
       await _storageService.saveAiSession(updatedSession);
+      await _logAiAudit(
+        sessionId,
+        action: 'plan_failed',
+        summary: prompt.trim(),
+        detail: assistantMessage.errorMessage ?? '任务规划失败',
+        success: false,
+      );
       _runtimeSessions[sessionId] = AiSessionRuntimeSnapshot(
         session: updatedSession,
         messages: _replaceMessage(_runtimeSessions[sessionId]!.messages, assistantMessage),
@@ -276,9 +498,9 @@ class AiAssistantService {
     if (snapshot == null) {
       return;
     }
-    final manager = _sessionManagers[sessionId];
-    if (manager != null && snapshot.activeExecutionId.isNotEmpty) {
-      manager.interruptExecution(snapshot.activeExecutionId);
+    final executor = _sessionExecutors[sessionId];
+    if (executor != null && snapshot.activeExecutionId.isNotEmpty) {
+      executor.interruptExecution(snapshot.activeExecutionId);
     }
 
     final updatedSession = snapshot.session.copyWith(
@@ -314,12 +536,12 @@ class AiAssistantService {
     required String sessionId,
     required String assistantMessageId,
     required String prompt,
+    required AiCommandExecutor executor,
     required VoidCallback onChanged,
   }) async {
-    final manager = _sessionManagers[sessionId];
     final provider = _sessionProviders[sessionId];
     final server = _sessionServers[sessionId];
-    if (manager == null || provider == null || server == null) {
+    if (provider == null || server == null) {
       return;
     }
 
@@ -382,6 +604,12 @@ class AiAssistantService {
             status: AiTaskStatus.running,
             onChanged: onChanged,
           );
+          await _logAiAudit(
+            sessionId,
+            action: 'step_skipped',
+            summary: step.command,
+            detail: '用户拒绝执行高风险步骤: ${step.title}',
+          );
           continue;
         }
         step = step.copyWith(status: AiStepStatus.pending);
@@ -413,7 +641,7 @@ class AiAssistantService {
       );
 
       final result = await _executeStepWithAutoPrivilege(
-        manager: manager,
+        executor: executor,
         sessionId: sessionId,
         messageId: assistantMessageId,
         stepId: running.id,
@@ -438,6 +666,13 @@ class AiAssistantService {
         messageId: assistantMessageId,
         updatedStep: finalStep,
         onChanged: onChanged,
+      );
+      await _logAiAudit(
+        sessionId,
+        action: 'execute_step',
+        summary: running.command,
+        detail: _buildStepAuditDetail(finalStep),
+        success: finalStep.status == AiStepStatus.success,
       );
       if (result.interrupted) {
         return;
@@ -550,13 +785,25 @@ class AiAssistantService {
         messageId: mergedSteps,
       },
     );
+    await _logAiAudit(
+      sessionId,
+      action: review.isSatisfied ? 'assistant_answer' : 'review_iteration',
+      summary: prompt,
+      detail: review.finalAnswer.isNotEmpty ? review.finalAnswer : updatedMessage.analysis,
+      success: updatedMessage.status != AiTaskStatus.failed,
+    );
     onChanged();
 
     if (nextSteps.isNotEmpty) {
+      final nextExecutor = _sessionExecutors[sessionId];
+      if (nextExecutor == null) {
+        return;
+      }
       await _runMessageSteps(
         sessionId: sessionId,
         assistantMessageId: messageId,
         prompt: prompt,
+        executor: nextExecutor,
         onChanged: onChanged,
       );
     }
@@ -620,8 +867,8 @@ class AiAssistantService {
     }
   }
 
-  Future<SshExecutionResult> _executeStepWithAutoPrivilege({
-    required SshManager manager,
+  Future<AiCommandResult> _executeStepWithAutoPrivilege({
+    required AiCommandExecutor executor,
     required String sessionId,
     required String messageId,
     required String stepId,
@@ -630,7 +877,7 @@ class AiAssistantService {
   }) async {
     final effectiveCommand = _wrapContinuousCommandIfNeeded(command);
     var result = await _runHandle(
-      handle: await manager.executeUserCommandStream(effectiveCommand),
+      handle: await executor.executeUserCommandStream(effectiveCommand),
       sessionId: sessionId,
       messageId: messageId,
       stepId: stepId,
@@ -655,7 +902,7 @@ class AiAssistantService {
         );
       }
       result = await _runHandle(
-        handle: await manager.executePrivilegedUserCommandStream(effectiveCommand),
+        handle: await executor.executePrivilegedUserCommandStream(effectiveCommand),
         sessionId: sessionId,
         messageId: messageId,
         stepId: stepId,
@@ -666,8 +913,8 @@ class AiAssistantService {
     return result;
   }
 
-  Future<SshExecutionResult> _runHandle({
-    required SshExecutionHandle handle,
+  Future<AiCommandResult> _runHandle({
+    required AiCommandExecutionHandle handle,
     required String sessionId,
     required String messageId,
     required String stepId,
@@ -710,7 +957,7 @@ class AiAssistantService {
     return handle.result;
   }
 
-  bool _shouldRetryWithPrivilege(String command, SshExecutionResult result) {
+  bool _shouldRetryWithPrivilege(String command, AiCommandResult result) {
     if (result.interrupted) {
       return false;
     }
@@ -907,6 +1154,56 @@ class AiAssistantService {
       return merged;
     }
     return '${merged.substring(0, _streamMaxChars)}\n\n[输出已截断，超出 $_streamMaxChars 字符]';
+  }
+
+  Future<void> _logAiAudit(
+    String sessionId, {
+    required String action,
+    required String summary,
+    String detail = '',
+    bool success = true,
+  }) async {
+    final logger = _sessionAuditLoggers[sessionId];
+    if (logger == null) {
+      return;
+    }
+    try {
+      final server = _sessionServers[sessionId];
+      final taggedDetail = <String>[
+        '[[session_id:$sessionId]]',
+        if (server != null) '[[server_name:${server.name}]]',
+        if (detail.trim().isNotEmpty) detail.trim(),
+      ].join('\n');
+      await logger(
+        action: action,
+        summary: _truncateAuditText(summary, limit: 400),
+        detail: _truncateAuditText(taggedDetail, limit: 4000),
+        success: success,
+      );
+    } catch (_) {}
+  }
+
+  String _buildStepAuditDetail(AiStepRecord step) {
+    final buffer = StringBuffer()
+      ..writeln('title=${step.title}')
+      ..writeln('status=${step.status.name}');
+    if (step.summary.isNotEmpty) {
+      buffer.writeln('summary=${step.summary}');
+    }
+    if (step.output.isNotEmpty) {
+      buffer.writeln('stdout=${step.output}');
+    }
+    if (step.errorOutput.isNotEmpty) {
+      buffer.writeln('stderr=${step.errorOutput}');
+    }
+    return buffer.toString().trim();
+  }
+
+  String _truncateAuditText(String value, {required int limit}) {
+    if (value.length <= limit) {
+      return value;
+    }
+    return '${value.substring(0, limit)}\n\n[已截断，原始内容超出 $limit 字符]';
   }
 
   String _wrapContinuousCommandIfNeeded(String command) {

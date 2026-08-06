@@ -175,7 +175,7 @@ class TopBar extends StatelessWidget {
           ).showSnackBar(
             SnackBar(
               content: Text(
-                '个人免费版最多支持 10 台总资源（本地 ${provider.servers.length} 台，共享 ${provider.importedSharedServerCount} 台）',
+                '个人免费版最多支持 ${provider.maxManagedServerCount} 台总资源（本地 ${provider.servers.length} 台，共享 ${provider.importedSharedServerCount} 台）',
               ),
             ),
           );

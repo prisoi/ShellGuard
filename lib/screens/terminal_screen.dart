@@ -1,70 +1,56 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:xterm/xterm.dart';
 
 import '../models/server.dart';
+import '../models/terminal_session_models.dart';
 import '../providers/app_provider.dart';
 import '../widgets/adaptive_page_layout.dart';
 import '../widgets/app_button_styles.dart';
 
-class _TerminalBootstrapData {
-  final String host;
-  final String currentPath;
-  final String shell;
-  final String openedAt;
-  final String kernel;
-  final String uptime;
-
-  const _TerminalBootstrapData({
-    required this.host,
-    required this.currentPath,
-    required this.shell,
-    required this.openedAt,
-    required this.kernel,
-    required this.uptime,
-  });
-}
-
-class _TerminalCommandResult {
-  final String output;
-  final String currentPath;
-
-  const _TerminalCommandResult({
-    required this.output,
-    required this.currentPath,
-  });
-}
-
-class _TerminalTabSession {
+class _TerminalTab {
   final String id;
   String title;
-  List<String> outputLines;
-  List<String> commandHistory;
-  String draftCommand = '';
-  String historyDraft = '';
-  int historyCursor = -1;
-  bool isBusy = false;
-  String currentPath = '/';
-  String host = 'server';
-  String shell = 'bash';
-  String openedAt = '';
+  Terminal terminal;
+  TerminalController controller;
+  FocusNode focusNode;
+  TerminalSessionHandle? session;
+  StreamSubscription<String>? outputSubscription;
+  bool isConnecting = false;
+  bool isClosed = false;
+  bool hasStarted = false;
+  String status;
 
-  _TerminalTabSession({
+  _TerminalTab({
     required this.id,
     required this.title,
-    this.outputLines = const <String>[],
-    this.commandHistory = const <String>[],
+    required this.terminal,
+    required this.controller,
+    required this.focusNode,
+    this.status = '准备连接',
   });
 }
 
 class _TerminalWorkspace {
-  final List<_TerminalTabSession> tabs;
+  final String serverId;
+  final List<_TerminalTab> tabs;
   String activeTabId;
 
   _TerminalWorkspace({
+    required this.serverId,
     required this.tabs,
     required this.activeTabId,
   });
+}
+
+enum _TerminalContextAction {
+  copy,
+  paste,
+  selectAll,
 }
 
 class TerminalScreen extends StatefulWidget {
@@ -75,32 +61,66 @@ class TerminalScreen extends StatefulWidget {
 }
 
 class _TerminalScreenState extends State<TerminalScreen> {
-  final TextEditingController _commandController = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
-  final FocusNode _commandFocusNode = FocusNode();
-
   final Map<String, _TerminalWorkspace> _workspaces = {};
   String? _activeServerId;
+
+  bool get _useHardwareKeyboardOnly {
+    if (kIsWeb) {
+      return false;
+    }
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.windows ||
+      TargetPlatform.linux ||
+      TargetPlatform.macOS => true,
+      _ => false,
+    };
+  }
+
+  static const TerminalTheme _terminalTheme = TerminalTheme(
+    cursor: Color(0xFF2DD4BF),
+    selection: Color(0x5534D399),
+    foreground: Color(0xFFE5E7EB),
+    background: Color(0xFF0A0D12),
+    black: Color(0xFF111827),
+    red: Color(0xFFF87171),
+    green: Color(0xFF34D399),
+    yellow: Color(0xFFFBBF24),
+    blue: Color(0xFF60A5FA),
+    magenta: Color(0xFFC084FC),
+    cyan: Color(0xFF22D3EE),
+    white: Color(0xFFE5E7EB),
+    brightBlack: Color(0xFF6B7280),
+    brightRed: Color(0xFFFCA5A5),
+    brightGreen: Color(0xFF6EE7B7),
+    brightYellow: Color(0xFFFDE68A),
+    brightBlue: Color(0xFF93C5FD),
+    brightMagenta: Color(0xFFD8B4FE),
+    brightCyan: Color(0xFF67E8F9),
+    brightWhite: Color(0xFFF9FAFB),
+    searchHitBackground: Color(0xFF3F6212),
+    searchHitBackgroundCurrent: Color(0xFF65A30D),
+    searchHitForeground: Color(0xFFFFFFFF),
+  );
 
   @override
   void initState() {
     super.initState();
-    _commandController.addListener(_cacheActiveTabDraft);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) {
         return;
       }
       final provider = Provider.of<AppProvider>(context, listen: false);
-      await _handleServerChanged(provider.selectedServer);
+      await _handleServerChanged(provider);
     });
   }
 
   @override
   void dispose() {
-    _commandController.removeListener(_cacheActiveTabDraft);
-    _commandController.dispose();
-    _scrollController.dispose();
-    _commandFocusNode.dispose();
+    final futures = <Future<void>>[];
+    for (final workspace in _workspaces.values) {
+      futures.add(_disposeWorkspace(workspace));
+    }
+    unawaited(Future.wait(futures));
     super.dispose();
   }
 
@@ -111,7 +131,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
     return _workspaces[_activeServerId!];
   }
 
-  _TerminalTabSession? _activeTab() {
+  _TerminalTab? _activeTab() {
     final workspace = _activeWorkspace();
     if (workspace == null) {
       return null;
@@ -124,263 +144,142 @@ class _TerminalScreenState extends State<TerminalScreen> {
     return workspace.tabs.isEmpty ? null : workspace.tabs.first;
   }
 
-  Future<void> _handleServerChanged(Server? server) async {
-    _cacheActiveTabDraft();
-    _activeServerId = server?.id;
-
-    if (server == null) {
-      _commandController.clear();
+  Future<void> _handleServerChanged(AppProvider provider) async {
+    final selected = provider.selectedServer;
+    if (selected == null) {
+      _activeServerId = null;
       if (mounted) {
         setState(() {});
       }
       return;
     }
 
-    final existing = _workspaces[server.id];
-    if (existing == null || existing.tabs.isEmpty) {
-      final firstTab = _createTabModel(index: 1);
-      final workspace = _TerminalWorkspace(
-        tabs: [firstTab],
-        activeTabId: firstTab.id,
+    _activeServerId = selected.id;
+    var workspace = _workspaces[selected.id];
+    if (workspace == null) {
+      workspace = _TerminalWorkspace(
+        serverId: selected.id,
+        tabs: <_TerminalTab>[],
+        activeTabId: '',
       );
-      _workspaces[server.id] = workspace;
-      _applyActiveTabDraft();
+      _workspaces[selected.id] = workspace;
       if (mounted) {
         setState(() {});
       }
-      await _bootstrapTab(firstTab, server);
       return;
     }
 
-    _applyActiveTabDraft();
     if (mounted) {
       setState(() {});
     }
-    _scrollToBottom(jumpOnly: true);
+    _focusActiveTab();
   }
 
-  _TerminalTabSession _createTabModel({required int index}) {
-    return _TerminalTabSession(
-      id: 'tab_${DateTime.now().microsecondsSinceEpoch}_$index',
-      title: '终端 $index',
-      outputLines: const <String>[],
-      commandHistory: <String>[],
+  _TerminalTab _createTab({required int index}) {
+    late final _TerminalTab tab;
+    final terminal = Terminal(
+      maxLines: 10000,
     );
+    final controller = TerminalController();
+    final focusNode = FocusNode(debugLabel: 'terminal_tab_$index');
+
+    tab = _TerminalTab(
+      id: 'terminal_${DateTime.now().microsecondsSinceEpoch}_$index',
+      title: index == 1 ? '终端' : '终端 $index',
+      terminal: terminal,
+      controller: controller,
+      focusNode: focusNode,
+      status: '准备连接',
+    );
+
+    terminal.onOutput = (data) {
+      tab.session?.write(data);
+    };
+    terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+      tab.session?.resize(width, height, pixelWidth, pixelHeight);
+    };
+
+    return tab;
   }
 
-  Future<void> _bootstrapTab(_TerminalTabSession tab, Server server) async {
-    final provider = Provider.of<AppProvider>(context, listen: false);
-    tab.isBusy = true;
-    tab.outputLines = <String>[
-      '正在连接 ${server.name} (${server.ip})…',
-      '',
-    ];
+  Future<void> _startShellForTab(
+    _TerminalTab tab,
+    Server server,
+    AppProvider provider,
+  ) async {
+    tab.hasStarted = true;
+    tab.isConnecting = true;
+    tab.isClosed = false;
+    tab.status = '正在连接 ${server.name}';
+    tab.terminal.write(_buildWelcomeBanner(server));
     if (mounted) {
       setState(() {});
-    }
-
-    final ready = await provider.ensureTerminalConnection();
-    if (!ready) {
-      tab.isBusy = false;
-      tab.outputLines = <String>[
-        '无法连接到 ${server.name} (${server.ip})',
-        '请先确认服务器已连接后再打开终端。',
-        '',
-      ];
-      if (mounted) {
-        setState(() {});
-      }
-      return;
     }
 
     try {
-      final raw = await provider.executeSelectedCommand(
-        _buildBootstrapCommand(),
+      final handle = await provider.openSelectedTerminalSession();
+      tab.session = handle;
+      tab.status = '已连接到 ${server.name}';
+      tab.outputSubscription = handle.stream.listen((chunk) {
+        tab.terminal.write(chunk);
+      });
+      unawaited(
+        handle.done.then((result) {
+          tab.isClosed = true;
+          tab.isConnecting = false;
+          tab.status = result.disconnected
+              ? '终端已断开'
+              : '终端已结束（exit ${result.exitCode ?? '-'}）';
+          tab.terminal.write(
+            '\r\n[ShellGuard] ${tab.status}，可新开终端继续操作。\r\n',
+          );
+          if (mounted) {
+            setState(() {});
+          }
+        }),
       );
-      final bootstrap = _parseBootstrapData(raw, server);
-      tab.host = bootstrap.host;
-      tab.currentPath = bootstrap.currentPath;
-      tab.shell = bootstrap.shell;
-      tab.openedAt = bootstrap.openedAt;
-      tab.outputLines = _buildWelcomeLines(server, bootstrap);
+      _focusTab(tab);
     } catch (error) {
-      tab.outputLines = <String>[
-        '已连接到 ${server.name} (${server.ip})',
-        '终端欢迎信息加载失败：${error.toString().replaceFirst('Exception: ', '')}',
-        '',
-      ];
+      tab.isClosed = true;
+      tab.status = error.toString().replaceFirst('Exception: ', '');
+      tab.terminal.write('\r\n[ShellGuard] ${tab.status}\r\n');
     } finally {
-      tab.isBusy = false;
-      if (_activeTab()?.id == tab.id) {
-        _applyActiveTabDraft();
-      }
+      tab.isConnecting = false;
       if (mounted) {
         setState(() {});
       }
-      _scrollToBottom(jumpOnly: true);
     }
   }
 
-  List<String> _buildWelcomeLines(
-    Server server,
-    _TerminalBootstrapData bootstrap,
-  ) {
-    return <String>[
-      'Last login: ${bootstrap.openedAt} via ShellGuard Desktop',
-      'Connected to ${server.name} (${server.ip})',
-      'Welcome to ${server.osDisplayLabel}${bootstrap.kernel.trim().isEmpty ? '' : ' · kernel ${bootstrap.kernel}'}',
-      'User: ${server.username}   Host: ${bootstrap.host}   Shell: ${bootstrap.shell}',
-      if (bootstrap.uptime.trim().isNotEmpty) 'Uptime: ${bootstrap.uptime}',
-      'Working directory: ${bootstrap.currentPath}',
-      '',
-    ];
-  }
-
-  String _buildBootstrapCommand() {
-    final script = '''
-export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$HOME/.local/share/uv/bin:\$PATH";
-[ -f /etc/profile ] && . /etc/profile >/dev/null 2>&1;
-[ -f "\$HOME/.profile" ] && . "\$HOME/.profile" >/dev/null 2>&1;
-[ -f "\$HOME/.bash_profile" ] && . "\$HOME/.bash_profile" >/dev/null 2>&1;
-[ -f "\$HOME/.bashrc" ] && . "\$HOME/.bashrc" >/dev/null 2>&1;
-printf "__SG_HOST__=%s\n" "\$(hostname 2>/dev/null || echo unknown)";
-printf "__SG_PWD__=%s\n" "\$PWD";
-printf "__SG_SHELL__=%s\n" "\${SHELL:-bash}";
-printf "__SG_TIME__=%s\n" "\$(date '+%a %b %d %H:%M:%S %Y' 2>/dev/null || date)";
-printf "__SG_KERNEL__=%s\n" "\$(uname -r 2>/dev/null || echo '')";
-printf "__SG_UPTIME__=%s\n" "\$(uptime -p 2>/dev/null || echo '')";
-''';
-    return 'bash -lc ${_shellQuote(script)}';
-  }
-
-  String _buildTerminalCommand(_TerminalTabSession tab, String command) {
-    final script = '''
-export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$HOME/.local/share/uv/bin:\$PATH";
-[ -f /etc/profile ] && . /etc/profile >/dev/null 2>&1;
-[ -f "\$HOME/.profile" ] && . "\$HOME/.profile" >/dev/null 2>&1;
-[ -f "\$HOME/.bash_profile" ] && . "\$HOME/.bash_profile" >/dev/null 2>&1;
-[ -f "\$HOME/.bashrc" ] && . "\$HOME/.bashrc" >/dev/null 2>&1;
-cd ${_shellQuote(tab.currentPath)} >/dev/null 2>&1 || cd "\$HOME" >/dev/null 2>&1 || true;
-$command
-status=\$?
-printf "\n__SG_PWD__=%s\n" "\$PWD"
-exit \$status
-''';
-    return 'bash -lc ${_shellQuote(script)}';
-  }
-
-  String _shellQuote(String value) {
-    return "'${value.replaceAll("'", r"'\''")}'";
-  }
-
-  _TerminalBootstrapData _parseBootstrapData(String raw, Server server) {
-    final markers = _extractMarkers(raw);
-    return _TerminalBootstrapData(
-      host: markers['__SG_HOST__']?.trim().isNotEmpty == true
-          ? markers['__SG_HOST__']!.trim()
-          : server.name,
-      currentPath: markers['__SG_PWD__']?.trim().isNotEmpty == true
-          ? markers['__SG_PWD__']!.trim()
-          : '/',
-      shell: markers['__SG_SHELL__']?.trim().isNotEmpty == true
-          ? markers['__SG_SHELL__']!.trim()
-          : 'bash',
-      openedAt: markers['__SG_TIME__']?.trim().isNotEmpty == true
-          ? markers['__SG_TIME__']!.trim()
-          : DateTime.now().toString(),
-      kernel: markers['__SG_KERNEL__']?.trim() ?? '',
-      uptime: markers['__SG_UPTIME__']?.trim() ?? '',
-    );
-  }
-
-  _TerminalCommandResult _parseTerminalCommandResult(
-    String raw,
-    _TerminalTabSession tab,
-  ) {
-    final markers = _extractMarkers(raw);
-    final currentPath = markers['__SG_PWD__']?.trim().isNotEmpty == true
-        ? markers['__SG_PWD__']!.trim()
-        : tab.currentPath;
-    final sanitizedLines = raw
-        .split('\n')
-        .where(
-          (line) =>
-              !line.startsWith('__SG_PWD__=') &&
-              !line.startsWith('__SG_HOST__=') &&
-              !line.startsWith('__SG_SHELL__=') &&
-              !line.startsWith('__SG_TIME__=') &&
-              !line.startsWith('__SG_KERNEL__=') &&
-              !line.startsWith('__SG_UPTIME__='),
-        )
-        .toList();
-    return _TerminalCommandResult(
-      output: sanitizedLines.join('\n').trimRight(),
-      currentPath: currentPath,
-    );
-  }
-
-  Map<String, String> _extractMarkers(String raw) {
-    final result = <String, String>{};
-    for (final line in raw.split('\n')) {
-      final index = line.indexOf('=');
-      if (!line.startsWith('__SG_') || index <= 0) {
-        continue;
-      }
-      result[line.substring(0, index)] = line.substring(index + 1);
-    }
-    return result;
-  }
-
-  String _buildPrompt(Server server, _TerminalTabSession tab) {
-    final segment = _pathTail(tab.currentPath);
-    final isRoot = server.username.trim() == 'root';
-    return '[${server.username}@${tab.host} $segment]${isRoot ? '#' : '\$'}';
-  }
-
-  String _pathTail(String path) {
-    final normalized = path.trim();
-    if (normalized.isEmpty || normalized == '/') {
-      return '/';
-    }
-    final parts = normalized.split('/').where((part) => part.isNotEmpty).toList();
-    return parts.isEmpty ? '/' : parts.last;
-  }
-
-  void _cacheActiveTabDraft() {
-    final activeTab = _activeTab();
-    if (activeTab == null) {
-      return;
-    }
-    activeTab.draftCommand = _commandController.text;
-  }
-
-  void _applyActiveTabDraft() {
-    final activeTab = _activeTab();
-    final value = activeTab?.draftCommand ?? '';
-    _commandController.value = TextEditingValue(
-      text: value,
-      selection: TextSelection.collapsed(offset: value.length),
-    );
+  String _buildWelcomeBanner(Server server) {
+    final time = DateTime.now();
+    final minute = time.minute.toString().padLeft(2, '0');
+    final hour = time.hour.toString().padLeft(2, '0');
+    final month = time.month.toString().padLeft(2, '0');
+    final day = time.day.toString().padLeft(2, '0');
+    return ''
+        'Last login: ${time.year}-$month-$day $hour:$minute via ShellGuard Desktop\r\n'
+        'Connecting to ${server.name} (${server.ip.isEmpty ? 'shared-terminal' : server.ip})\r\n'
+        'OS: ${server.osDisplayLabel}\r\n'
+        'User: ${server.username.isEmpty ? 'shared-session' : server.username}\r\n'
+        '\r\n';
   }
 
   Future<void> _openNewTab() async {
     final provider = Provider.of<AppProvider>(context, listen: false);
     final server = provider.selectedServer;
-    if (server == null) {
-      return;
-    }
     final workspace = _activeWorkspace();
-    if (workspace == null) {
+    if (server == null || workspace == null) {
       return;
     }
-    final tab = _createTabModel(index: workspace.tabs.length + 1);
+
+    final tab = _createTab(index: workspace.tabs.length + 1);
     workspace.tabs.add(tab);
     workspace.activeTabId = tab.id;
-    _applyActiveTabDraft();
     if (mounted) {
       setState(() {});
     }
-    await _bootstrapTab(tab, server);
+    await _startShellForTab(tab, server, provider);
   }
 
   void _switchTab(String tabId) {
@@ -388,172 +287,225 @@ exit \$status
     if (workspace == null || workspace.activeTabId == tabId) {
       return;
     }
-    _cacheActiveTabDraft();
     workspace.activeTabId = tabId;
-    _applyActiveTabDraft();
-    setState(() {});
-    _commandFocusNode.requestFocus();
-    _scrollToBottom(jumpOnly: true);
+    if (mounted) {
+      setState(() {});
+    }
+    _focusActiveTab();
   }
 
-  void _closeTab(String tabId) {
+  Future<void> _closeTab(String tabId) async {
     final workspace = _activeWorkspace();
-    if (workspace == null || workspace.tabs.length <= 1) {
+    if (workspace == null) {
       return;
     }
     final index = workspace.tabs.indexWhere((tab) => tab.id == tabId);
     if (index == -1) {
       return;
     }
-    workspace.tabs.removeAt(index);
-    if (workspace.activeTabId == tabId) {
+    final tab = workspace.tabs.removeAt(index);
+    await _disposeTab(tab);
+    if (workspace.tabs.isEmpty) {
+      workspace.activeTabId = '';
+    } else if (workspace.activeTabId == tabId) {
       final nextIndex = index == 0 ? 0 : index - 1;
       workspace.activeTabId = workspace.tabs[nextIndex].id;
-      _applyActiveTabDraft();
     }
-    setState(() {});
-  }
-
-  void _clearActiveTerminalOutput(Server? server) {
-    final activeTab = _activeTab();
-    if (activeTab == null || server == null) {
-      return;
-    }
-    activeTab.outputLines = _buildWelcomeLines(
-      server,
-      _TerminalBootstrapData(
-        host: activeTab.host,
-        currentPath: activeTab.currentPath,
-        shell: activeTab.shell,
-        openedAt: activeTab.openedAt,
-        kernel: server.kernelVersion ?? '',
-        uptime: server.uptime ?? '',
-      ),
-    );
-    activeTab.historyCursor = -1;
-    activeTab.historyDraft = '';
-    activeTab.commandHistory = <String>[];
-    setState(() {});
-    _scrollToBottom(jumpOnly: true);
-  }
-
-  Future<void> _executeCommand() async {
-    final provider = Provider.of<AppProvider>(context, listen: false);
-    final server = provider.selectedServer;
-    final activeTab = _activeTab();
-    final command = _commandController.text.trim();
-    if (server == null || activeTab == null || command.isEmpty || activeTab.isBusy) {
-      return;
-    }
-
-    final ready = await provider.ensureTerminalConnection();
-    if (!ready) {
-      activeTab.outputLines.addAll(<String>[
-        '${_buildPrompt(server, activeTab)} $command',
-        '无法连接到服务器，请先建立连接。',
-        '',
-      ]);
-      _commandController.clear();
+    if (mounted) {
       setState(() {});
-      _scrollToBottom();
+    }
+    _focusActiveTab();
+  }
+
+  Future<void> _sendClear() async {
+    final tab = _activeTab();
+    if (tab?.session == null || tab!.isClosed || !tab.hasStarted) {
+      return;
+    }
+    tab.session!.write('clear\r');
+    _focusTab(tab);
+  }
+
+  Future<void> _sendInterrupt() async {
+    final tab = _activeTab();
+    if (tab?.session == null || tab!.isClosed || !tab.hasStarted) {
+      return;
+    }
+    tab.session!.write('\u0003');
+    _focusTab(tab);
+  }
+
+  Future<void> _copyOrPaste(_TerminalTab tab) async {
+    final selection = tab.controller.selection;
+    if (selection != null) {
+      final text = tab.terminal.buffer.getText(selection);
+      tab.controller.clearSelection();
+      await Clipboard.setData(ClipboardData(text: text));
+      return;
+    }
+    final data = await Clipboard.getData('text/plain');
+    final text = data?.text;
+    if (text == null || text.isEmpty) {
+      return;
+    }
+    tab.terminal.paste(text);
+    _focusTab(tab);
+  }
+
+  Future<void> _copySelection(_TerminalTab tab) async {
+    final selection = tab.controller.selection;
+    if (selection == null) {
+      return;
+    }
+    final text = tab.terminal.buffer.getText(selection);
+    if (text.isEmpty) {
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: text));
+    tab.controller.clearSelection();
+    _focusTab(tab);
+  }
+
+  Future<void> _pasteClipboard(_TerminalTab tab) async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text == null || text.isEmpty) {
+      return;
+    }
+    tab.terminal.paste(text);
+    _focusTab(tab);
+  }
+
+  void _selectAllTerminal(_TerminalTab tab) {
+    final startLine = (tab.terminal.buffer.height - tab.terminal.viewHeight)
+        .clamp(0, tab.terminal.buffer.height - 1);
+    final endLine = (tab.terminal.buffer.height - 1).clamp(0, tab.terminal.buffer.height - 1);
+    tab.controller.setSelection(
+      tab.terminal.buffer.createAnchor(0, startLine),
+      tab.terminal.buffer.createAnchor(tab.terminal.viewWidth, endLine),
+      mode: SelectionMode.line,
+    );
+    _focusTab(tab);
+  }
+
+  Future<void> _showTerminalContextMenu(
+    _TerminalTab tab,
+    TapDownDetails details,
+  ) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) {
+      await _copyOrPaste(tab);
       return;
     }
 
-    if (activeTab.historyCursor == -1) {
-      activeTab.historyDraft = '';
-    }
-    if (activeTab.commandHistory.isEmpty || activeTab.commandHistory.first != command) {
-      activeTab.commandHistory.insert(0, command);
-    }
-    activeTab.historyCursor = -1;
-    activeTab.historyDraft = '';
-    activeTab.isBusy = true;
-    activeTab.outputLines.add('${_buildPrompt(server, activeTab)} $command');
-    _commandController.clear();
-    setState(() {});
-    _scrollToBottom();
+    final action = await showMenu<_TerminalContextAction>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(
+          details.globalPosition,
+          details.globalPosition,
+        ),
+        Offset.zero & overlay.size,
+      ),
+      color: const Color(0xFF111827),
+      shadowColor: const Color(0x55000000),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: Color(0xFF263040)),
+      ),
+      items: [
+        PopupMenuItem(
+          value: _TerminalContextAction.copy,
+          child: _buildTerminalContextMenuItem(
+            icon: Icons.copy_all_outlined,
+            label: '复制',
+          ),
+        ),
+        PopupMenuItem(
+          value: _TerminalContextAction.paste,
+          child: _buildTerminalContextMenuItem(
+            icon: Icons.content_paste_go_outlined,
+            label: '粘贴',
+          ),
+        ),
+        PopupMenuItem(
+          value: _TerminalContextAction.selectAll,
+          child: _buildTerminalContextMenuItem(
+            icon: Icons.select_all_outlined,
+            label: '全选',
+          ),
+        ),
+      ],
+    );
 
-    try {
-      final raw = await provider.executeSelectedCommand(
-        _buildTerminalCommand(activeTab, command),
-      );
-      final result = _parseTerminalCommandResult(raw, activeTab);
-      activeTab.currentPath = result.currentPath;
-      if (result.output.isNotEmpty) {
-        activeTab.outputLines.addAll(result.output.split('\n'));
-      }
-      await provider.saveOperationLog(
-        command: command,
-        result: result.output.isEmpty ? 'Command completed' : result.output,
-      );
-    } catch (error) {
-      final parsed = _parseTerminalCommandResult(
-        error.toString().replaceFirst('Exception: ', ''),
-        activeTab,
-      );
-      activeTab.currentPath = parsed.currentPath;
-      if (parsed.output.isNotEmpty) {
-        activeTab.outputLines.addAll(parsed.output.split('\n'));
-      } else {
-        activeTab.outputLines.add('Command failed');
-      }
-      await provider.saveOperationLog(
-        command: command,
-        result: parsed.output.isEmpty ? error.toString() : parsed.output,
-      );
-    } finally {
-      activeTab.outputLines.add('');
-      activeTab.isBusy = false;
-      if (mounted) {
-        setState(() {});
-      }
-      _scrollToBottom();
+    switch (action) {
+      case _TerminalContextAction.copy:
+        await _copySelection(tab);
+        break;
+      case _TerminalContextAction.paste:
+        await _pasteClipboard(tab);
+        break;
+      case _TerminalContextAction.selectAll:
+        _selectAllTerminal(tab);
+        break;
+      case null:
+        break;
     }
   }
 
-  void _navigateHistory(int offset) {
-    final activeTab = _activeTab();
-    if (activeTab == null || activeTab.commandHistory.isEmpty) {
-      return;
-    }
-    if (activeTab.historyCursor == -1) {
-      activeTab.historyDraft = _commandController.text;
-    }
-    final nextCursor = activeTab.historyCursor + offset;
-    if (nextCursor < 0) {
-      activeTab.historyCursor = -1;
-      _commandController.value = TextEditingValue(
-        text: activeTab.historyDraft,
-        selection: TextSelection.collapsed(offset: activeTab.historyDraft.length),
-      );
-      return;
-    }
-    if (nextCursor >= activeTab.commandHistory.length) {
-      return;
-    }
-    activeTab.historyCursor = nextCursor;
-    final value = activeTab.commandHistory[nextCursor];
-    _commandController.value = TextEditingValue(
-      text: value,
-      selection: TextSelection.collapsed(offset: value.length),
+  Widget _buildTerminalContextMenuItem({
+    required IconData icon,
+    required String label,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          icon,
+          size: 16,
+          color: const Color(0xFFE5E7EB),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          label,
+          style: const TextStyle(
+            color: Color(0xFFF8FAFC),
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
     );
   }
 
-  void _scrollToBottom({bool jumpOnly = false}) {
+  void _focusActiveTab() {
+    final tab = _activeTab();
+    if (tab == null) {
+      return;
+    }
+    _focusTab(tab);
+  }
+
+  void _focusTab(_TerminalTab tab) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) {
+      if (!mounted) {
         return;
       }
-      if (jumpOnly) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-        return;
-      }
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
+      tab.focusNode.requestFocus();
     });
+  }
+
+  Future<void> _disposeWorkspace(_TerminalWorkspace workspace) async {
+    for (final tab in workspace.tabs) {
+      await _disposeTab(tab);
+    }
+  }
+
+  Future<void> _disposeTab(_TerminalTab tab) async {
+    await tab.outputSubscription?.cancel();
+    await tab.session?.close();
+    tab.focusNode.dispose();
   }
 
   @override
@@ -564,41 +516,37 @@ exit \$status
         if (!mounted) {
           return;
         }
-        await _handleServerChanged(provider.selectedServer);
+        await _handleServerChanged(provider);
       });
     }
 
-    final activeTab = _activeTab();
     final server = provider.selectedServer;
+    final activeTab = _activeTab();
 
     return AdaptivePageLayout(
-      backgroundColor: const Color(0xFF111315),
-      estimatedReservedHeight: 184,
-      minBodyHeight: 280,
+      backgroundColor: const Color(0xFF0D1117),
+      estimatedReservedHeight: 156,
+      minBodyHeight: 320,
       header: [
         _buildTabStrip(provider),
         const SizedBox(height: 12),
-        _buildSessionBar(server, activeTab),
+        _buildSessionToolbar(server, activeTab),
         const SizedBox(height: 12),
       ],
-      body: _buildTerminalViewport(activeTab),
-      footer: [
-        const SizedBox(height: 12),
-        _buildCommandBar(provider, server, activeTab),
-      ],
+      body: _buildTerminalBody(activeTab),
     );
   }
 
   Widget _buildTabStrip(AppProvider provider) {
     final workspace = _activeWorkspace();
-    final tabs = workspace?.tabs ?? const <_TerminalTabSession>[];
+    final tabs = workspace?.tabs ?? const <_TerminalTab>[];
     return Container(
-      height: 46,
+      height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF181B1F),
+        color: const Color(0xFF161B22),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF242933)),
+        border: Border.all(color: const Color(0xFF222B36)),
       ),
       child: Row(
         children: [
@@ -610,7 +558,7 @@ exit \$status
               itemBuilder: (context, index) {
                 final tab = tabs[index];
                 final isActive = workspace?.activeTabId == tab.id;
-                return _buildTabChip(tab, isActive, tabs.length > 1);
+                return _buildTabChip(tab, isActive, true);
               },
             ),
           ),
@@ -618,12 +566,11 @@ exit \$status
           IconButton(
             tooltip: '新建终端',
             onPressed: provider.selectedServer == null ? null : _openNewTab,
-            visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.add, size: 18),
-            color: const Color(0xFF9CA3AF),
             style: IconButton.styleFrom(
-              backgroundColor: const Color(0xFF101317),
-              foregroundColor: const Color(0xFFD1D5DB),
+              backgroundColor: const Color(0xFF0F141B),
+              foregroundColor: const Color(0xFFE5E7EB),
+              disabledBackgroundColor: const Color(0xFF111827),
               disabledForegroundColor: const Color(0xFF6B7280),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10),
@@ -635,56 +582,44 @@ exit \$status
     );
   }
 
-  Widget _buildTabChip(
-    _TerminalTabSession tab,
-    bool isActive,
-    bool canClose,
-  ) {
+  Widget _buildTabChip(_TerminalTab tab, bool isActive, bool canClose) {
     return Material(
-      color: isActive ? const Color(0xFF0F1318) : const Color(0xFF1F242B),
-      borderRadius: BorderRadius.circular(10),
+      color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
         onTap: () => _switchTab(tab.id),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
+            color: isActive ? const Color(0xFF0B0F15) : const Color(0xFF1B2330),
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
               color: isActive
                   ? const Color(0xFF2DD4BF)
-                  : const Color(0xFF2B313C),
+                  : const Color(0xFF2A3340),
             ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (tab.isBusy)
-                const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Color(0xFF2DD4BF),
-                  ),
-                )
-              else
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: isActive
-                        ? const Color(0xFF2DD4BF)
-                        : const Color(0xFF6B7280),
-                    shape: BoxShape.circle,
-                  ),
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: tab.isConnecting
+                      ? const Color(0xFFFBBF24)
+                      : tab.isClosed
+                          ? const Color(0xFF6B7280)
+                          : const Color(0xFF34D399),
+                  shape: BoxShape.circle,
                 ),
+              ),
               const SizedBox(width: 10),
               Text(
                 tab.title,
                 style: TextStyle(
                   color: isActive
-                      ? const Color(0xFFE5FDF7)
+                      ? const Color(0xFFF8FAFC)
                       : const Color(0xFFD1D5DB),
                   fontSize: 13,
                   fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
@@ -694,15 +629,13 @@ exit \$status
                 const SizedBox(width: 8),
                 InkWell(
                   borderRadius: BorderRadius.circular(99),
-                  onTap: () => _closeTab(tab.id),
-                  child: Padding(
-                    padding: const EdgeInsets.all(2),
+                  onTap: () => unawaited(_closeTab(tab.id)),
+                  child: const Padding(
+                    padding: EdgeInsets.all(2),
                     child: Icon(
                       Icons.close,
                       size: 14,
-                      color: isActive
-                          ? const Color(0xFFA7F3D0)
-                          : const Color(0xFF9CA3AF),
+                      color: Color(0xFF9CA3AF),
                     ),
                   ),
                 ),
@@ -714,41 +647,80 @@ exit \$status
     );
   }
 
-  Widget _buildSessionBar(Server? server, _TerminalTabSession? tab) {
-    if (server == null || tab == null) {
+  Widget _buildSessionToolbar(Server? server, _TerminalTab? activeTab) {
+    if (server == null) {
       return Container(
         width: double.infinity,
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: const Color(0xFF181B1F),
+          color: const Color(0xFF161B22),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFF242933)),
+          border: Border.all(color: const Color(0xFF222B36)),
         ),
         child: const Text(
-          '请选择并连接服务器后再打开终端。',
-          style: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+          '请选择并连接服务器后再打开 Web 终端。',
+          style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
         ),
       );
     }
 
-    Widget chip(IconData icon, String text, Color accent) {
+    final userLabel = server.username.isEmpty ? '共享会话' : server.username;
+
+    Widget pill(IconData icon, String text, Color color) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
-          color: const Color(0xFF0F1318),
+          color: const Color(0xFF0B0F15),
           borderRadius: BorderRadius.circular(10),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 14, color: accent),
+            Icon(icon, size: 14, color: color),
             const SizedBox(width: 6),
             Text(
               text,
               style: const TextStyle(
+                color: Color(0xFFE5E7EB),
                 fontSize: 12,
-                color: Color(0xFFD1D5DB),
               ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (activeTab == null) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF161B22),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFF222B36)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  pill(Icons.dns_outlined, server.name, const Color(0xFF2DD4BF)),
+                  pill(Icons.person_outline, userLabel, const Color(0xFF60A5FA)),
+                  pill(Icons.memory_outlined, server.osDisplayLabel, const Color(0xFFC084FC)),
+                  pill(Icons.pause_circle_outline, '尚未建立终端连接', const Color(0xFF94A3B8)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            TextButton.icon(
+              onPressed: _openNewTab,
+              style: AppButtonStyles.primary(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              ),
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('新建并连接'),
             ),
           ],
         ),
@@ -759,9 +731,9 @@ exit \$status
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFF181B1F),
+        color: const Color(0xFF161B22),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF242933)),
+        border: Border.all(color: const Color(0xFF222B36)),
       ),
       child: Row(
         children: [
@@ -770,180 +742,234 @@ exit \$status
               spacing: 8,
               runSpacing: 8,
               children: [
-                chip(Icons.dns_outlined, server.name, const Color(0xFF2DD4BF)),
-                chip(Icons.person_outline, server.username, const Color(0xFF60A5FA)),
-                chip(Icons.folder_open_outlined, tab.currentPath, const Color(0xFFF59E0B)),
-                chip(Icons.memory_outlined, server.osDisplayLabel, const Color(0xFFA78BFA)),
+                pill(Icons.dns_outlined, server.name, const Color(0xFF2DD4BF)),
+                pill(Icons.person_outline, userLabel, const Color(0xFF60A5FA)),
+                pill(Icons.memory_outlined, server.osDisplayLabel, const Color(0xFFC084FC)),
+                pill(
+                  activeTab.isConnecting
+                      ? Icons.sync
+                      : activeTab.isClosed
+                          ? Icons.link_off
+                          : Icons.terminal,
+                  activeTab.status,
+                  activeTab.isConnecting
+                      ? const Color(0xFFFBBF24)
+                      : activeTab.isClosed
+                          ? const Color(0xFFF87171)
+                          : const Color(0xFF34D399),
+                ),
               ],
             ),
           ),
           const SizedBox(width: 12),
-          TextButton.icon(
-            onPressed: tab.isBusy ? null : () => _clearActiveTerminalOutput(server),
-            style: AppButtonStyles.text(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            ).copyWith(
-              foregroundColor: const WidgetStatePropertyAll(Color(0xFF9CA3AF)),
-            ),
-            icon: const Icon(Icons.delete_outline, size: 16),
-            label: const Text('清屏'),
+          Wrap(
+            spacing: 8,
+            children: [
+              TextButton.icon(
+                onPressed: activeTab.isClosed ? null : () => _copySelection(activeTab),
+                style: AppButtonStyles.text(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                ).copyWith(
+                  foregroundColor: const WidgetStatePropertyAll(
+                    Color(0xFFBFDBFE),
+                  ),
+                ),
+                icon: const Icon(Icons.copy_all_outlined, size: 16),
+                label: const Text('复制'),
+              ),
+              TextButton.icon(
+                onPressed: activeTab.isClosed ? null : () => _pasteClipboard(activeTab),
+                style: AppButtonStyles.text(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                ).copyWith(
+                  foregroundColor: const WidgetStatePropertyAll(
+                    Color(0xFFA7F3D0),
+                  ),
+                ),
+                icon: const Icon(Icons.content_paste_go_outlined, size: 16),
+                label: const Text('粘贴'),
+              ),
+              TextButton.icon(
+                onPressed: activeTab.isClosed ? null : _sendInterrupt,
+                style: AppButtonStyles.text(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                ).copyWith(
+                  foregroundColor: const WidgetStatePropertyAll(
+                    Color(0xFFFCA5A5),
+                  ),
+                ),
+                icon: const Icon(Icons.block, size: 16),
+                label: const Text('发送中断'),
+              ),
+              TextButton.icon(
+                onPressed: activeTab.isClosed ? null : _sendClear,
+                style: AppButtonStyles.text(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                ).copyWith(
+                  foregroundColor: const WidgetStatePropertyAll(
+                    Color(0xFF9CA3AF),
+                  ),
+                ),
+                icon: const Icon(Icons.layers_clear_outlined, size: 16),
+                label: const Text('清屏'),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _buildTerminalViewport(_TerminalTabSession? activeTab) {
-    final lines = activeTab?.outputLines ?? const <String>[];
+  Widget _buildTerminalBody(_TerminalTab? activeTab) {
+    if (activeTab == null) {
+      return Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF0A0D12),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFF202833)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x33000000),
+              blurRadius: 18,
+              offset: Offset(0, 12),
+            ),
+          ],
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 58,
+                    height: 58,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF111827),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.terminal,
+                      color: Color(0xFF2DD4BF),
+                      size: 28,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    '尚未建立终端连接',
+                    style: TextStyle(
+                      color: Color(0xFFF8FAFC),
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '为避免切换服务器时自动建立 SSH 会话造成网络拥堵，ShellGuard 现在只有在你点击右上角 + 后才会创建第一个终端连接。',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Color(0xFF94A3B8),
+                      fontSize: 13,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  ElevatedButton.icon(
+                    onPressed: _openNewTab,
+                    style: AppButtonStyles.primary(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                    ),
+                    icon: const Icon(Icons.add, size: 16),
+                    label: const Text('新建终端并连接'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF0B0D10),
+        color: const Color(0xFF0A0D12),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFF20242C)),
+        border: Border.all(color: const Color(0xFF202833)),
         boxShadow: const [
           BoxShadow(
             color: Color(0x33000000),
             blurRadius: 18,
-            offset: Offset(0, 10),
+            offset: Offset(0, 12),
           ),
         ],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-      child: ListView.builder(
-        controller: _scrollController,
-        itemCount: lines.length,
-        itemBuilder: (context, index) {
-          final line = lines[index];
-          final style = _lineStyle(line);
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 2),
-            child: Text(
-              line,
-              style: style,
-              softWrap: true,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  TextStyle _lineStyle(String line) {
-    Color color = const Color(0xFFE5E7EB);
-    FontWeight weight = FontWeight.w500;
-    if (line.startsWith('Last login:')) {
-      color = const Color(0xFF93C5FD);
-    } else if (line.startsWith('Connected to')) {
-      color = const Color(0xFF2DD4BF);
-    } else if (line.startsWith('Welcome to')) {
-      color = const Color(0xFFFDE68A);
-      weight = FontWeight.w600;
-    } else if (line.startsWith('User:') || line.startsWith('Working directory:') || line.startsWith('Uptime:')) {
-      color = const Color(0xFF9CA3AF);
-    } else if (line.startsWith('[')) {
-      color = const Color(0xFFFFFFFF);
-      weight = FontWeight.w600;
-    } else if (line.contains('无法连接') || line.contains('失败')) {
-      color = const Color(0xFFFCA5A5);
-    }
-    return TextStyle(
-      fontSize: 14,
-      fontFamily: 'Monospace',
-      color: color,
-      fontWeight: weight,
-      height: 1.35,
-    );
-  }
-
-  Widget _buildCommandBar(
-    AppProvider provider,
-    Server? server,
-    _TerminalTabSession? activeTab,
-  ) {
-    final enabled = server != null && activeTab != null && !activeTab.isBusy;
-    final prompt = server == null || activeTab == null
-        ? '\$'
-        : _buildPrompt(server, activeTab);
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF181B1F),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFF242933)),
-      ),
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+      child: Stack(
         children: [
-          Text(
-            prompt,
-            style: const TextStyle(
-              fontSize: 14,
-              fontFamily: 'Monospace',
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF2DD4BF),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Focus(
-              onKeyEvent: (node, event) {
-                if (event is! KeyDownEvent) {
-                  return KeyEventResult.ignored;
-                }
-                if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
-                  _navigateHistory(1);
-                  return KeyEventResult.handled;
-                }
-                if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
-                  _navigateHistory(-1);
-                  return KeyEventResult.handled;
-                }
-                return KeyEventResult.ignored;
-              },
-              child: TextField(
-                controller: _commandController,
-                focusNode: _commandFocusNode,
-                enabled: enabled,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  hintText: '输入命令后按 Enter 执行…',
-                  hintStyle: TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF6B7280),
-                  ),
-                  border: InputBorder.none,
+          Positioned.fill(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: TerminalView(
+                activeTab.terminal,
+                controller: activeTab.controller,
+                focusNode: activeTab.focusNode,
+                autofocus: true,
+                hardwareKeyboardOnly: _useHardwareKeyboardOnly,
+                theme: _terminalTheme,
+                backgroundOpacity: 1,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 10,
                 ),
-                style: const TextStyle(
+                textStyle: const TerminalStyle(
                   fontSize: 14,
-                  fontFamily: 'Monospace',
-                  color: Color(0xFFF9FAFB),
+                  height: 1.28,
                 ),
-                cursorColor: const Color(0xFF2DD4BF),
-                onSubmitted: (_) => _executeCommand(),
+                alwaysShowCursor: true,
+                onSecondaryTapDown: (details, offset) {
+                  unawaited(_showTerminalContextMenu(activeTab, details));
+                },
               ),
             ),
           ),
-          const SizedBox(width: 12),
-          if (activeTab?.isBusy == true)
-            const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Color(0xFF2DD4BF),
+          Positioned(
+            right: 16,
+            bottom: 14,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: const Color(0xCC111827),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: const Color(0xFF263040)),
               ),
-            )
-          else
-            ElevatedButton(
-              onPressed: enabled ? _executeCommand : null,
-              style: AppButtonStyles.primary(
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-              ).copyWith(
-                backgroundColor: const WidgetStatePropertyAll(Color(0xFF0F766E)),
-                foregroundColor: const WidgetStatePropertyAll(Colors.white),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Text(
+                  '右键菜单 / Ctrl+Shift+C 复制 / Ctrl+V 粘贴',
+                  style: TextStyle(
+                    color: Color(0xFF94A3B8),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
               ),
-              child: const Text('执行命令'),
             ),
+          ),
         ],
       ),
     );

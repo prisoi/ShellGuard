@@ -145,10 +145,16 @@ class SshFileTransferBackend implements FileTransferBackend {
 class ShareFileTransferBackend implements FileTransferBackend {
   final ShareClient client;
   final String serverId;
+  final String serverName;
+  final String sharedGroupId;
+  final String sharedGroupName;
 
   const ShareFileTransferBackend({
     required this.client,
     required this.serverId,
+    this.serverName = '',
+    this.sharedGroupId = '',
+    this.sharedGroupName = '',
   });
 
   @override
@@ -157,6 +163,9 @@ class ShareFileTransferBackend implements FileTransferBackend {
       final size = await client.statRemoteFileSize(
         serverId: serverId,
         path: remotePath,
+        serverName: serverName,
+        sharedGroupId: sharedGroupId,
+        sharedGroupName: sharedGroupName,
       );
       return size != null;
     } catch (_) {
@@ -177,6 +186,9 @@ class ShareFileTransferBackend implements FileTransferBackend {
       localPath: localFilePath,
       cancelToken: cancelToken,
       onProgress: onProgress,
+      serverName: serverName,
+      sharedGroupId: sharedGroupId,
+      sharedGroupName: sharedGroupName,
     );
   }
 
@@ -193,6 +205,9 @@ class ShareFileTransferBackend implements FileTransferBackend {
       localPath: localFilePath,
       cancelToken: cancelToken,
       onProgress: onProgress,
+      serverName: serverName,
+      sharedGroupId: sharedGroupId,
+      sharedGroupName: sharedGroupName,
     );
   }
 
@@ -201,6 +216,9 @@ class ShareFileTransferBackend implements FileTransferBackend {
     await client.executeCommand(
       serverId: serverId,
       command: command,
+      serverName: serverName,
+      sharedGroupId: sharedGroupId,
+      sharedGroupName: sharedGroupName,
     );
   }
 
@@ -209,6 +227,9 @@ class ShareFileTransferBackend implements FileTransferBackend {
     return client.statRemoteFileSize(
       serverId: serverId,
       path: remotePath,
+      serverName: serverName,
+      sharedGroupId: sharedGroupId,
+      sharedGroupName: sharedGroupName,
     );
   }
 }

@@ -51,6 +51,11 @@ class SharedGroupRecord {
   final int sourcePort;
   final String sourceGroupName;
   final DateTime importedAt;
+  final String accessToken;
+  final String accessTokenId;
+  final String accessTokenNote;
+  final DateTime? lastVerifiedAt;
+  final String lastVerifyStatus;
   final List<SharedServerRecord> servers;
 
   const SharedGroupRecord({
@@ -60,6 +65,11 @@ class SharedGroupRecord {
     required this.sourcePort,
     required this.sourceGroupName,
     required this.importedAt,
+    this.accessToken = '',
+    this.accessTokenId = '',
+    this.accessTokenNote = '',
+    this.lastVerifiedAt,
+    this.lastVerifyStatus = '',
     this.servers = const [],
   });
 
@@ -70,6 +80,11 @@ class SharedGroupRecord {
     int? sourcePort,
     String? sourceGroupName,
     DateTime? importedAt,
+    String? accessToken,
+    String? accessTokenId,
+    String? accessTokenNote,
+    DateTime? lastVerifiedAt,
+    String? lastVerifyStatus,
     List<SharedServerRecord>? servers,
   }) {
     return SharedGroupRecord(
@@ -79,6 +94,11 @@ class SharedGroupRecord {
       sourcePort: sourcePort ?? this.sourcePort,
       sourceGroupName: sourceGroupName ?? this.sourceGroupName,
       importedAt: importedAt ?? this.importedAt,
+      accessToken: accessToken ?? this.accessToken,
+      accessTokenId: accessTokenId ?? this.accessTokenId,
+      accessTokenNote: accessTokenNote ?? this.accessTokenNote,
+      lastVerifiedAt: lastVerifiedAt ?? this.lastVerifiedAt,
+      lastVerifyStatus: lastVerifyStatus ?? this.lastVerifyStatus,
       servers: servers ?? this.servers,
     );
   }
@@ -91,6 +111,11 @@ class SharedGroupRecord {
       'sourcePort': sourcePort,
       'sourceGroupName': sourceGroupName,
       'importedAt': importedAt.toIso8601String(),
+      'accessToken': accessToken,
+      'accessTokenId': accessTokenId,
+      'accessTokenNote': accessTokenNote,
+      'lastVerifiedAt': lastVerifiedAt?.toIso8601String(),
+      'lastVerifyStatus': lastVerifyStatus,
       'servers': servers.map((item) => item.toJson()).toList(),
     };
   }
@@ -104,6 +129,13 @@ class SharedGroupRecord {
       sourcePort: (json['sourcePort'] as num).toInt(),
       sourceGroupName: json['sourceGroupName']!.toString(),
       importedAt: DateTime.parse(json['importedAt']!.toString()),
+      accessToken: json['accessToken']?.toString() ?? '',
+      accessTokenId: json['accessTokenId']?.toString() ?? '',
+      accessTokenNote: json['accessTokenNote']?.toString() ?? '',
+      lastVerifiedAt: json['lastVerifiedAt'] == null
+          ? null
+          : DateTime.tryParse(json['lastVerifiedAt']!.toString()),
+      lastVerifyStatus: json['lastVerifyStatus']?.toString() ?? '',
       servers: rawServers is List
           ? rawServers
                 .whereType<Map>()

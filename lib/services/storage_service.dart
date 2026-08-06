@@ -6,6 +6,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../models/cache_data.dart';
 import '../models/query_options.dart';
+import '../models/remote_control_models.dart';
 import '../models/server.dart';
 import '../models/share_listener_config.dart';
 import '../models/shared_server_models.dart';
@@ -54,7 +55,7 @@ class ServerConfigImportResult {
 
 class StorageService {
   static const String _databaseName = 'shellguard.db';
-  static const int _databaseVersion = 7;
+  static const int _databaseVersion = 8;
   static const String _serversFileName = 'servers.json';
   static const String _cacheFileName = 'cache.json';
   static const String _selectedServerFileName = 'selected_server.json';
@@ -108,6 +109,9 @@ class StorageService {
           }
           if (oldVersion < 7) {
             await _upgradeServersTableV7(db);
+          }
+          if (oldVersion < 8) {
+            await _upgradeRemoteControlTablesV8(db);
           }
         },
       ),
@@ -229,7 +233,7 @@ class StorageService {
         singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
         enabled INTEGER NOT NULL DEFAULT 0,
         port INTEGER NOT NULL DEFAULT 8848,
-        auth_mode TEXT NOT NULL DEFAULT 'none',
+        auth_mode TEXT NOT NULL DEFAULT 'token',
         token_hint TEXT
       )
     ''');
@@ -241,7 +245,12 @@ class StorageService {
         source_host_ip TEXT NOT NULL,
         source_port INTEGER NOT NULL,
         source_group_name TEXT NOT NULL,
-        imported_at TEXT NOT NULL
+        imported_at TEXT NOT NULL,
+        access_token TEXT,
+        access_token_id TEXT,
+        access_token_note TEXT,
+        last_verified_at TEXT,
+        last_verify_status TEXT
       )
     ''');
 
@@ -253,6 +262,55 @@ class StorageService {
         display_name TEXT NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS access_tokens (
+        id TEXT PRIMARY KEY,
+        token_value TEXT NOT NULL,
+        note TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at TEXT,
+        connection_count INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS remote_audit_logs (
+        id TEXT PRIMARY KEY,
+        access_token_id TEXT,
+        access_token_note TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL,
+        action TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        source_host TEXT NOT NULL DEFAULT '',
+        source_label TEXT NOT NULL DEFAULT '',
+        shared_group_id TEXT NOT NULL DEFAULT '',
+        shared_group_name TEXT NOT NULL DEFAULT '',
+        shared_server_id TEXT NOT NULL DEFAULT '',
+        shared_server_name TEXT NOT NULL DEFAULT '',
+        success INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+      )
+    ''');
+  }
+
+  Future<void> _upgradeRemoteControlTablesV8(DatabaseExecutor db) async {
+    await _createShareTables(db);
+    final statements = <String>[
+      'ALTER TABLE shared_groups ADD COLUMN access_token TEXT',
+      'ALTER TABLE shared_groups ADD COLUMN access_token_id TEXT',
+      'ALTER TABLE shared_groups ADD COLUMN access_token_note TEXT',
+      'ALTER TABLE shared_groups ADD COLUMN last_verified_at TEXT',
+      'ALTER TABLE shared_groups ADD COLUMN last_verify_status TEXT',
+    ];
+    for (final statement in statements) {
+      try {
+        await db.execute(statement);
+      } catch (_) {}
+    }
   }
 
   Future<void> _createAiTables(DatabaseExecutor db) async {
@@ -699,17 +757,20 @@ class StorageService {
         limit: 1,
       );
       if (rows.isEmpty) {
-        return const ShareListenerConfig();
+        return const ShareListenerConfig(authMode: ShareAuthMode.token);
       }
       final row = rows.first;
+      final parsedMode = _parseShareAuthMode(row['auth_mode']?.toString());
       return ShareListenerConfig(
         enabled: ((row['enabled'] as int?) ?? 0) == 1,
         port: (row['port'] as int?) ?? 8848,
-        authMode: _parseShareAuthMode(row['auth_mode']?.toString()),
+        authMode: parsedMode == ShareAuthMode.none
+            ? ShareAuthMode.token
+            : parsedMode,
         tokenHint: row['token_hint'] as String?,
       );
     } catch (_) {
-      return const ShareListenerConfig();
+      return const ShareListenerConfig(authMode: ShareAuthMode.token);
     }
   }
 
@@ -726,6 +787,197 @@ class StorageService {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<void> saveAccessToken(AccessTokenRecord token) async {
+    final db = await _db;
+    await db.insert(
+      'access_tokens',
+      {
+        'id': token.id,
+        'token_value': token.tokenValue,
+        'note': token.note,
+        'created_at': token.createdAt.toIso8601String(),
+        'expires_at': token.expiresAt.toIso8601String(),
+        'last_used_at': token.lastUsedAt?.toIso8601String(),
+        'revoked_at': token.revokedAt?.toIso8601String(),
+        'connection_count': token.connectionCount,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<AccessTokenRecord>> loadAccessTokens() async {
+    final db = await _db;
+    final rows = await db.query(
+      'access_tokens',
+      orderBy: 'created_at DESC',
+    );
+    return rows.map((row) {
+      return AccessTokenRecord(
+        id: row['id']!.toString(),
+        tokenValue: row['token_value']!.toString(),
+        note: row['note']!.toString(),
+        createdAt: DateTime.parse(row['created_at']!.toString()),
+        expiresAt: DateTime.parse(row['expires_at']!.toString()),
+        lastUsedAt: row['last_used_at'] == null
+            ? null
+            : DateTime.tryParse(row['last_used_at']!.toString()),
+        revokedAt: row['revoked_at'] == null
+            ? null
+            : DateTime.tryParse(row['revoked_at']!.toString()),
+        connectionCount: (row['connection_count'] as int?) ?? 0,
+      );
+    }).toList();
+  }
+
+  Future<AccessTokenRecord?> findAccessTokenByValue(String tokenValue) async {
+    final normalized = tokenValue.trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+    final db = await _db;
+    final rows = await db.query(
+      'access_tokens',
+      where: 'token_value = ?',
+      whereArgs: [normalized],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return null;
+    }
+    final row = rows.first;
+    return AccessTokenRecord(
+      id: row['id']!.toString(),
+      tokenValue: row['token_value']!.toString(),
+      note: row['note']!.toString(),
+      createdAt: DateTime.parse(row['created_at']!.toString()),
+      expiresAt: DateTime.parse(row['expires_at']!.toString()),
+      lastUsedAt: row['last_used_at'] == null
+          ? null
+          : DateTime.tryParse(row['last_used_at']!.toString()),
+      revokedAt: row['revoked_at'] == null
+          ? null
+          : DateTime.tryParse(row['revoked_at']!.toString()),
+      connectionCount: (row['connection_count'] as int?) ?? 0,
+    );
+  }
+
+  Future<void> revokeAccessToken(String tokenId) async {
+    final db = await _db;
+    await db.update(
+      'access_tokens',
+      {'revoked_at': DateTime.now().toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [tokenId],
+    );
+  }
+
+  Future<void> reactivateAccessToken(String tokenId) async {
+    final db = await _db;
+    await db.update(
+      'access_tokens',
+      {'revoked_at': null},
+      where: 'id = ?',
+      whereArgs: [tokenId],
+    );
+  }
+
+  Future<void> deleteAccessToken(String tokenId) async {
+    final db = await _db;
+    await db.transaction((txn) async {
+      await txn.delete(
+        'remote_audit_logs',
+        where: 'access_token_id = ?',
+        whereArgs: [tokenId],
+      );
+      await txn.delete(
+        'access_tokens',
+        where: 'id = ?',
+        whereArgs: [tokenId],
+      );
+    });
+  }
+
+  Future<void> markAccessTokenUsed(String tokenId) async {
+    final db = await _db;
+    await db.rawUpdate(
+      '''
+      UPDATE access_tokens
+      SET last_used_at = ?, connection_count = COALESCE(connection_count, 0) + 1
+      WHERE id = ?
+      ''',
+      [DateTime.now().toIso8601String(), tokenId],
+    );
+  }
+
+  Future<void> saveRemoteAuditLog(RemoteAuditRecord record) async {
+    final db = await _db;
+    await db.insert(
+      'remote_audit_logs',
+      {
+        'id': record.id,
+        'access_token_id': record.accessTokenId,
+        'access_token_note': record.accessTokenNote,
+        'category': record.category.name,
+        'action': record.action,
+        'summary': record.summary,
+        'detail': record.detail,
+        'source_host': record.sourceHost,
+        'source_label': record.sourceLabel,
+        'shared_group_id': record.sharedGroupId,
+        'shared_group_name': record.sharedGroupName,
+        'shared_server_id': record.sharedServerId,
+        'shared_server_name': record.sharedServerName,
+        'success': record.success ? 1 : 0,
+        'created_at': record.createdAt.toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<RemoteAuditRecord>> loadRemoteAuditLogs({
+    String? accessTokenId,
+    RemoteAuditCategory? category,
+    int limit = 200,
+  }) async {
+    final db = await _db;
+    final where = <String>[];
+    final args = <Object?>[];
+    if (accessTokenId != null && accessTokenId.trim().isNotEmpty) {
+      where.add('access_token_id = ?');
+      args.add(accessTokenId.trim());
+    }
+    if (category != null) {
+      where.add('category = ?');
+      args.add(category.name);
+    }
+    final rows = await db.query(
+      'remote_audit_logs',
+      where: where.isEmpty ? null : where.join(' AND '),
+      whereArgs: args.isEmpty ? null : args,
+      orderBy: 'created_at DESC',
+      limit: limit,
+    );
+    return rows.map((row) {
+      return RemoteAuditRecord(
+        id: row['id']!.toString(),
+        accessTokenId: row['access_token_id']?.toString(),
+        accessTokenNote: row['access_token_note']?.toString() ?? '',
+        category: RemoteAuditCategory.values.byName(row['category']!.toString()),
+        action: row['action']!.toString(),
+        summary: row['summary']!.toString(),
+        detail: row['detail']?.toString() ?? '',
+        sourceHost: row['source_host']?.toString() ?? '',
+        sourceLabel: row['source_label']?.toString() ?? '',
+        sharedGroupId: row['shared_group_id']?.toString() ?? '',
+        sharedGroupName: row['shared_group_name']?.toString() ?? '',
+        sharedServerId: row['shared_server_id']?.toString() ?? '',
+        sharedServerName: row['shared_server_name']?.toString() ?? '',
+        success: ((row['success'] as int?) ?? 0) == 1,
+        createdAt: DateTime.parse(row['created_at']!.toString()),
+      );
+    }).toList();
   }
 
   Map<String, Object?> buildSharedGroupExportJson({
@@ -794,6 +1046,11 @@ class StorageService {
   Future<SharedGroupRecord> importSharedGroupFromJson({
     required String filePath,
     String? displayNameOverride,
+    String accessToken = '',
+    String accessTokenId = '',
+    String accessTokenNote = '',
+    DateTime? verifiedAt,
+    String verifyStatus = 'verified',
   }) async {
     final payload = await readSharedGroupImportPayload(filePath: filePath);
 
@@ -814,6 +1071,11 @@ class StorageService {
       sourcePort: payload.port,
       sourceGroupName: payload.groupName,
       importedAt: DateTime.now(),
+      accessToken: accessToken.trim(),
+      accessTokenId: accessTokenId.trim(),
+      accessTokenNote: accessTokenNote.trim(),
+      lastVerifiedAt: verifiedAt,
+      lastVerifyStatus: verifyStatus,
       servers: payload.servers
           .map(
             (item) => SharedServerRecord(
@@ -841,6 +1103,11 @@ class StorageService {
           'source_port': group.sourcePort,
           'source_group_name': group.sourceGroupName,
           'imported_at': group.importedAt.toIso8601String(),
+          'access_token': group.accessToken,
+          'access_token_id': group.accessTokenId,
+          'access_token_note': group.accessTokenNote,
+          'last_verified_at': group.lastVerifiedAt?.toIso8601String(),
+          'last_verify_status': group.lastVerifyStatus,
         },
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
@@ -893,6 +1160,13 @@ class StorageService {
         sourcePort: (row['source_port'] as int?) ?? 8848,
         sourceGroupName: row['source_group_name']!.toString(),
         importedAt: DateTime.tryParse(row['imported_at']!.toString()) ?? DateTime.now(),
+        accessToken: row['access_token']?.toString() ?? '',
+        accessTokenId: row['access_token_id']?.toString() ?? '',
+        accessTokenNote: row['access_token_note']?.toString() ?? '',
+        lastVerifiedAt: row['last_verified_at'] == null
+            ? null
+            : DateTime.tryParse(row['last_verified_at']!.toString()),
+        lastVerifyStatus: row['last_verify_status']?.toString() ?? '',
         servers: serversByGroup[groupId] ?? const <SharedServerRecord>[],
       );
     }).toList();
@@ -1944,7 +2218,7 @@ class StorageService {
         return mode;
       }
     }
-    return ShareAuthMode.none;
+    return ShareAuthMode.token;
   }
 
   String _dedupeSharedGroupDisplayName({

@@ -1,3 +1,5 @@
+// ignore_for_file: unused_element
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -25,8 +27,6 @@ class SettingsScreen extends StatelessWidget {
             child: ListView(
               children: [
                 _buildAppearanceCard(),
-                const SizedBox(height: 24),
-                _buildShareSection(context, provider),
                 const SizedBox(height: 24),
                 _buildLlmSection(context, provider),
               ],

@@ -19,6 +19,7 @@ import './screens/monitoring_screen.dart';
 import './screens/file_management_screen.dart';
 import './screens/terminal_screen.dart';
 import './screens/ai_assistant_screen.dart';
+import './screens/remote_control_screen.dart';
 import './screens/settings_screen.dart';
 import './widgets/app_button_styles.dart';
 
@@ -80,6 +81,7 @@ class _MainScreenState extends State<MainScreen> {
     'monitoring',
     'files',
     'terminal',
+    'remote_control',
     'settings',
   ];
 
@@ -181,6 +183,8 @@ class _MainScreenState extends State<MainScreen> {
         return FileManagementScreen(key: _filesKey);
       case 'terminal':
         return const TerminalScreen();
+      case 'remote_control':
+        return const RemoteControlScreen();
       case 'settings':
         return const SettingsScreen();
       default:
@@ -214,6 +218,8 @@ class _MainScreenState extends State<MainScreen> {
         return '文件管理';
       case 'terminal':
         return 'Web终端';
+      case 'remote_control':
+        return '远程控制';
       case 'settings':
         return '系统设置';
       default:

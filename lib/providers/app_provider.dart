@@ -8,10 +8,13 @@ import '../core/ssh_engine.dart';
 import '../core/ssh_manager.dart';
 import '../models/cache_data.dart';
 import '../models/server.dart';
+import '../models/remote_control_models.dart';
 import '../models/share_listener_config.dart';
 import '../models/shared_server_models.dart';
+import '../models/terminal_session_models.dart';
 import '../services/ai_assistant_service.dart';
 import '../services/cache_service.dart';
+import '../services/license_limits_service.dart';
 import '../services/llm_service.dart';
 import '../services/storage_service.dart';
 import '../services/share/share_client.dart';
@@ -62,8 +65,6 @@ class ServerSelectionOption {
 }
 
 class AppProvider extends ChangeNotifier {
-  static const int freeServerLimit = 10;
-
   List<Server> _servers = [];
   Server? _selectedServer;
   List<SharedGroupRecord> _sharedGroups = [];
@@ -78,6 +79,8 @@ class AppProvider extends ChangeNotifier {
   late final LlmService _llmService;
   late final AiAssistantService _aiAssistantService;
   late final ShareListenerService _shareListenerService;
+  final LicenseLimitsService _licenseLimitsService = const LicenseLimitsService();
+  RuntimeLicenseLimits _runtimeLimits = RuntimeLicenseLimits.free;
   List<String> _groups = [];
   CacheData? _currentCache;
   Timer? _dbRefreshTimer;
@@ -91,6 +94,7 @@ class AppProvider extends ChangeNotifier {
   final Map<String, ShareClient> _shareClients = {};
   ShareListenerConfig _shareListenerConfig = const ShareListenerConfig();
   bool _sharedConnected = false;
+  List<AccessTokenRecord> _accessTokens = [];
 
   List<Server> get servers => _servers;
   List<SharedGroupRecord> get sharedGroups => _sharedGroups;
@@ -103,6 +107,16 @@ class AppProvider extends ChangeNotifier {
   ShareListenerConfig get shareListenerConfig => _shareListenerConfig;
   bool get isShareListenerRunning => _shareListenerService.isRunning;
   String? get shareListenerError => _shareListenerService.lastError;
+  List<AccessTokenRecord> get accessTokens => _accessTokens;
+  RuntimeLicenseLimits get runtimeLimits => _runtimeLimits;
+  int get maxManagedServerCount => _runtimeLimits.maxManagedServers;
+  int get maxConcurrentAccessTokenCount => _runtimeLimits.maxConcurrentAccessTokens;
+  Duration get maxAccessTokenLifetime => _runtimeLimits.maxAccessTokenLifetime;
+  int get activeAccessTokenCount => _accessTokens
+      .where((token) => !token.isExpired && !token.isRevoked)
+      .length;
+  bool get canCreateAccessToken =>
+      activeAccessTokenCount < maxConcurrentAccessTokenCount;
   Server? get selectedServer => isSharedSelection
       ? _buildSharedDisplayServer(_selectedSharedGroup!, _selectedSharedServer!)
       : _selectedServer;
@@ -132,7 +146,7 @@ class AppProvider extends ChangeNotifier {
     (total, group) => total + group.servers.length,
   );
   int get totalManagedServerCount => _servers.length + importedSharedServerCount;
-  int get remainingServerQuota => freeServerLimit - totalManagedServerCount;
+  int get remainingServerQuota => maxManagedServerCount - totalManagedServerCount;
   bool get canAddMoreServers => remainingServerQuota > 0;
   String get currentScreen => _currentScreen;
   List<LlmProviderConfig> get llmProviders => _llmProviders;
@@ -219,10 +233,20 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      _runtimeLimits = await _licenseLimitsService.loadRuntimeLimits();
       _servers = await _storageService.loadServers();
       _groups = await _storageService.loadGroups();
       _sharedGroups = await _storageService.loadImportedSharedGroups();
       _shareListenerConfig = await _storageService.loadShareListenerConfig();
+      if (_shareListenerConfig.authMode == ShareAuthMode.none) {
+        _shareListenerConfig = _shareListenerConfig.copyWith(
+          authMode: ShareAuthMode.token,
+          tokenHint: 'access-token',
+        );
+        await _storageService.saveShareListenerConfig(_shareListenerConfig);
+      }
+      _accessTokens = await _storageService.loadAccessTokens();
+      await _enforceRuntimeLimits();
       final selectedId = await _storageService.loadSelectedServer();
 
       if (_groups.isEmpty) {
@@ -263,7 +287,7 @@ class AppProvider extends ChangeNotifier {
   Future<void> addServer(Server server) async {
     if (!canAddMoreServers) {
       _errorMessage =
-          '个人免费版最多支持 10 台服务器（本地 ${_servers.length} 台，共享 $importedSharedServerCount 台）';
+          '个人免费版最多支持 $maxManagedServerCount 台总资源（本地 ${_servers.length} 台，共享 $importedSharedServerCount 台）';
       notifyListeners();
       throw Exception(_errorMessage);
     }
@@ -857,12 +881,7 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<bool> startAiPrompt(String prompt) async {
-    if (isSharedSelection) {
-      _errorMessage = '共享服务器暂不支持 AI 助力，请在源端直接使用。';
-      notifyListeners();
-      return false;
-    }
-    final server = _selectedServer;
+    final server = selectedServer;
     final llmProvider = defaultLlmProvider;
     if (server == null) {
       _errorMessage = '请先选择服务器';
@@ -875,21 +894,22 @@ class AppProvider extends ChangeNotifier {
       return false;
     }
     if (_activeAiSessionId == null) {
-      final sessionManager = SshManager();
-      final connected = await sessionManager.connect(server);
-      if (!connected) {
-        _errorMessage = sessionManager.errorMessage ?? 'SSH 连接失败';
-        notifyListeners();
+      final executor = await _buildAiExecutorForCurrentSelection(server.id);
+      if (executor == null) {
         return false;
       }
       final snapshot = await _aiAssistantService.createSession(
         server: server,
         provider: llmProvider,
-        sshManager: sessionManager,
+        executor: executor,
         initialPrompt: prompt,
+        auditLogger: _buildAiAuditLoggerForCurrentSelection(),
         onChanged: _syncAiRuntimeState,
       );
-      _aiSessionManagers[snapshot.session.id] = sessionManager;
+      if (!isSharedSelection) {
+        _aiSessionManagers[snapshot.session.id] =
+            (executor as LocalAiCommandExecutor).manager;
+      }
       _activeAiSessionId = snapshot.session.id;
     } else {
       final prepared = await _ensureAiSessionRuntime(
@@ -913,30 +933,26 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> createAiSession() async {
-    if (isSharedSelection) {
-      _errorMessage = '共享服务器暂不支持 AI 助力，请在源端直接使用。';
-      notifyListeners();
-      return;
-    }
-    final server = _selectedServer;
+    final server = selectedServer;
     final llmProvider = defaultLlmProvider;
     if (server == null || llmProvider == null) {
       return;
     }
-    final sessionManager = SshManager();
-    final connected = await sessionManager.connect(server);
-    if (!connected) {
-      _errorMessage = sessionManager.errorMessage ?? 'SSH 连接失败';
-      notifyListeners();
+    final executor = await _buildAiExecutorForCurrentSelection(server.id);
+    if (executor == null) {
       return;
     }
     final snapshot = await _aiAssistantService.createSession(
       server: server,
       provider: llmProvider,
-      sshManager: sessionManager,
+      executor: executor,
+      auditLogger: _buildAiAuditLoggerForCurrentSelection(),
       onChanged: _syncAiRuntimeState,
     );
-    _aiSessionManagers[snapshot.session.id] = sessionManager;
+    if (!isSharedSelection) {
+      _aiSessionManagers[snapshot.session.id] =
+          (executor as LocalAiCommandExecutor).manager;
+    }
     _activeAiSessionId = snapshot.session.id;
     await _loadAiSessions(notify: false);
     notifyListeners();
@@ -1121,6 +1137,9 @@ class AppProvider extends ChangeNotifier {
     required LlmProviderConfig provider,
   }) async {
     if (_aiAssistantService.hasRuntimeSession(sessionId)) {
+      if (isSharedSelection) {
+        return true;
+      }
       final existingManager = _aiSessionManagers[sessionId];
       if (existingManager != null &&
           existingManager.isConnected &&
@@ -1129,17 +1148,13 @@ class AppProvider extends ChangeNotifier {
       }
     }
 
-    var sessionManager = _aiSessionManagers[sessionId];
-    sessionManager ??= SshManager();
-    if (!(sessionManager.isConnected && sessionManager.currentServer?.id == server.id)) {
-      final connected = await sessionManager.connect(server);
-      if (!connected) {
-        _errorMessage = sessionManager.errorMessage ?? 'SSH 连接失败';
-        notifyListeners();
-        return false;
-      }
+    final executor = await _buildAiExecutorForCurrentSelection(server.id);
+    if (executor == null) {
+      return false;
     }
-    _aiSessionManagers[sessionId] = sessionManager;
+    if (!isSharedSelection) {
+      _aiSessionManagers[sessionId] = (executor as LocalAiCommandExecutor).manager;
+    }
 
     AiSessionRecord? session;
     for (final item in _aiSessions) {
@@ -1171,7 +1186,8 @@ class AppProvider extends ChangeNotifier {
       stepsByMessageId: stepsByMessage,
       server: server,
       provider: provider,
-      sshManager: sessionManager,
+      executor: executor,
+      auditLogger: _buildAiAuditLoggerForCurrentSelection(),
       onChanged: _syncAiRuntimeState,
     );
     return true;
@@ -1214,21 +1230,35 @@ class AppProvider extends ChangeNotifier {
 
   Future<SharedGroupRecord> importSharedGroupFromJson({
     required String filePath,
+    required String accessToken,
     String? displayNameOverride,
   }) async {
     final payload = await _storageService.readSharedGroupImportPayload(
       filePath: filePath,
     );
     final nextTotal = totalManagedServerCount + payload.servers.length;
-    if (nextTotal > freeServerLimit) {
+    if (nextTotal > maxManagedServerCount) {
       throw Exception(
         '导入失败：当前已有 $totalManagedServerCount 台资源（本地 ${_servers.length} 台，共享 $importedSharedServerCount 台），'
-        '该共享组包含 ${payload.servers.length} 台，导入后会超过免费版上限 10 台',
+        '该共享组包含 ${payload.servers.length} 台，导入后会超过免费版上限 $maxManagedServerCount 台',
       );
+    }
+    final client = ShareClient(
+      baseUri: Uri.parse('http://${payload.hostIp.trim()}:${payload.port}'),
+      accessToken: accessToken.trim(),
+    );
+    final validation = await client.verifyAccessToken();
+    if (!validation.valid || validation.tokenId == null) {
+      throw Exception(validation.message.isEmpty ? 'token 验证失败' : validation.message);
     }
     final group = await _storageService.importSharedGroupFromJson(
       filePath: filePath,
       displayNameOverride: displayNameOverride,
+      accessToken: accessToken.trim(),
+      accessTokenId: validation.tokenId ?? '',
+      accessTokenNote: validation.tokenNote,
+      verifiedAt: DateTime.now(),
+      verifyStatus: 'verified',
     );
     _sharedGroups = await _storageService.loadImportedSharedGroups();
     notifyListeners();
@@ -1290,12 +1320,85 @@ class AppProvider extends ChangeNotifier {
   Future<bool> testShareEndpoint({
     required String host,
     required int port,
+    String accessToken = '',
   }) async {
     final client = ShareClient(
       baseUri: Uri.parse('http://$host:$port'),
+      accessToken: accessToken.trim(),
     );
     final success = await client.healthCheck();
     return success;
+  }
+
+  Future<AccessTokenRecord> createAccessToken({
+    required String note,
+    required DateTime expiresAt,
+  }) async {
+    if (!canCreateAccessToken) {
+      throw Exception(
+        '个人免费版同时最多保留 $maxConcurrentAccessTokenCount 个生效中的 access-token，请先删除或失效旧 token',
+      );
+    }
+    final now = DateTime.now();
+    final maxExpiresAt = now.add(maxAccessTokenLifetime);
+    final normalizedExpiresAt = expiresAt.isAfter(maxExpiresAt)
+        ? maxExpiresAt
+        : expiresAt;
+    final token = AccessTokenRecord(
+      id: now.microsecondsSinceEpoch.toString(),
+      tokenValue: _generateAccessTokenValue(now),
+      note: note.trim(),
+      createdAt: now,
+      expiresAt: normalizedExpiresAt,
+    );
+    await _storageService.saveAccessToken(token);
+    _accessTokens = await _storageService.loadAccessTokens();
+    notifyListeners();
+    return token;
+  }
+
+  Future<void> deleteAccessToken(String tokenId) async {
+    await _storageService.deleteAccessToken(tokenId);
+    _accessTokens = await _storageService.loadAccessTokens();
+    notifyListeners();
+  }
+
+  Future<void> setAccessTokenRevoked(String tokenId, bool revoked) async {
+    if (revoked) {
+      await _storageService.revokeAccessToken(tokenId);
+    } else {
+      if (!canCreateAccessToken) {
+        throw Exception(
+          '个人免费版同时最多保留 $maxConcurrentAccessTokenCount 个生效中的 access-token，请先删除、失效或等待过期后再启用',
+        );
+      }
+      await _storageService.reactivateAccessToken(tokenId);
+    }
+    _accessTokens = await _storageService.loadAccessTokens();
+    notifyListeners();
+  }
+
+  Future<void> refreshRemoteControlState({bool notify = true}) async {
+    _accessTokens = await _storageService.loadAccessTokens();
+    await _enforceActiveAccessTokenLimit();
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<List<RemoteAuditRecord>> loadRemoteAuditLogs({
+    String? accessTokenId,
+    RemoteAuditCategory? category,
+    int limit = 200,
+  }) async {
+    final logs = await _storageService.loadRemoteAuditLogs(
+      accessTokenId: accessTokenId,
+      category: category,
+      limit: limit,
+    );
+    _accessTokens = await _storageService.loadAccessTokens();
+    notifyListeners();
+    return logs;
   }
 
   Future<String> executeSelectedCommand(
@@ -1311,6 +1414,9 @@ class AppProvider extends ChangeNotifier {
         command: command,
         privileged: privileged,
         userShell: userShell,
+        serverName: server.displayName,
+        sharedGroupId: _selectedSharedGroup!.id,
+        sharedGroupName: _selectedSharedGroup!.displayName,
       );
     }
     await _ensureSelectedLocalManagerConnected();
@@ -1323,6 +1429,48 @@ class AppProvider extends ChangeNotifier {
     return _sshManager.executeCommand(command);
   }
 
+  bool get supportsInteractiveTerminal => selectedServer != null;
+
+  Future<TerminalSessionHandle> openSelectedTerminalSession({
+    int columns = 120,
+    int rows = 32,
+  }) async {
+    if (isSharedSelection) {
+      final ready = await _ensureSharedConnection();
+      if (!ready) {
+        throw Exception(_errorMessage.isEmpty ? '共享侦听端口连接失败' : _errorMessage);
+      }
+      final group = _selectedSharedGroup!;
+      final server = _selectedSharedServer!;
+      return _selectedShareClient().openTerminalSession(
+        serverId: server.remoteServerId,
+        columns: columns,
+        rows: rows,
+        serverName: server.displayName,
+        sharedGroupId: group.id,
+        sharedGroupName: group.displayName,
+      );
+    }
+    await _ensureSelectedLocalManagerConnected();
+    final localHandle = await _sshManager.openShellSession(
+      columns: columns,
+      rows: rows,
+    );
+    return TerminalSessionHandle(
+      sessionId: localHandle.sessionId,
+      stream: localHandle.stream,
+      done: localHandle.done.then((result) {
+        return TerminalSessionResult(
+          exitCode: result.exitCode,
+          disconnected: result.disconnected,
+        );
+      }),
+      write: localHandle.write,
+      resize: localHandle.resize,
+      close: localHandle.close,
+    );
+  }
+
   Future<DirectoryResolution> resolveSelectedDirectory(
     String? path, {
     bool fallbackToParent = false,
@@ -1332,6 +1480,9 @@ class AppProvider extends ChangeNotifier {
         serverId: _selectedSharedServer!.remoteServerId,
         path: path,
         fallbackToParent: fallbackToParent,
+        serverName: _selectedSharedServer!.displayName,
+        sharedGroupId: _selectedSharedGroup!.id,
+        sharedGroupName: _selectedSharedGroup!.displayName,
       );
     }
     return _sshManager.resolveDirectory(
@@ -1345,6 +1496,9 @@ class AppProvider extends ChangeNotifier {
       return _selectedShareClient().createDirectory(
         serverId: _selectedSharedServer!.remoteServerId,
         path: path,
+        serverName: _selectedSharedServer!.displayName,
+        sharedGroupId: _selectedSharedGroup!.id,
+        sharedGroupName: _selectedSharedGroup!.displayName,
       );
     }
     return _sshManager.createDirectory(path);
@@ -1356,6 +1510,9 @@ class AppProvider extends ChangeNotifier {
         serverId: _selectedSharedServer!.remoteServerId,
         path: path,
         content: content,
+        serverName: _selectedSharedServer!.displayName,
+        sharedGroupId: _selectedSharedGroup!.id,
+        sharedGroupName: _selectedSharedGroup!.displayName,
       );
     }
     return _sshManager.writeFile(path, content);
@@ -1366,6 +1523,9 @@ class AppProvider extends ChangeNotifier {
       return _selectedShareClient().deleteFile(
         serverId: _selectedSharedServer!.remoteServerId,
         path: path,
+        serverName: _selectedSharedServer!.displayName,
+        sharedGroupId: _selectedSharedGroup!.id,
+        sharedGroupName: _selectedSharedGroup!.displayName,
       );
     }
     return _sshManager.deleteFile(path);
@@ -1377,6 +1537,9 @@ class AppProvider extends ChangeNotifier {
         serverId: _selectedSharedServer!.remoteServerId,
         oldPath: oldPath,
         newPath: newPath,
+        serverName: _selectedSharedServer!.displayName,
+        sharedGroupId: _selectedSharedGroup!.id,
+        sharedGroupName: _selectedSharedGroup!.displayName,
       );
     }
     return _sshManager.renameFile(oldPath, newPath);
@@ -1651,27 +1814,52 @@ WantedBy=multi-user.target
     _sharedConnected = true;
     switch (scope) {
       case RefreshScope.dashboard:
-        final snapshot = await client.fetchDashboard(server.remoteServerId);
-        await _cacheService.updateCache(
+          final snapshot = await client.fetchDashboard(
+            server.remoteServerId,
+            serverName: server.displayName,
+            sharedGroupId: group.id,
+            sharedGroupName: group.displayName,
+          );
+          await _cacheService.updateCache(
           selectedId,
           systemInfo: snapshot.systemInfo,
           resourceUsage: snapshot.resourceUsage,
-        );
-        break;
+          );
+          break;
       case RefreshScope.processes:
-        final processes = await client.fetchProcesses(server.remoteServerId);
+        final processes = await client.fetchProcesses(
+          server.remoteServerId,
+          serverName: server.displayName,
+          sharedGroupId: group.id,
+          sharedGroupName: group.displayName,
+        );
         await _cacheService.updateCache(selectedId, processes: processes);
         break;
       case RefreshScope.ports:
-        final ports = await client.fetchPorts(server.remoteServerId);
+        final ports = await client.fetchPorts(
+          server.remoteServerId,
+          serverName: server.displayName,
+          sharedGroupId: group.id,
+          sharedGroupName: group.displayName,
+        );
         await _cacheService.updateCache(selectedId, ports: ports);
         break;
       case RefreshScope.services:
-        final services = await client.fetchServices(server.remoteServerId);
+        final services = await client.fetchServices(
+          server.remoteServerId,
+          serverName: server.displayName,
+          sharedGroupId: group.id,
+          sharedGroupName: group.displayName,
+        );
         await _cacheService.updateCache(selectedId, services: services);
         break;
       case RefreshScope.firewall:
-        final firewall = await client.fetchFirewall(server.remoteServerId);
+        final firewall = await client.fetchFirewall(
+          server.remoteServerId,
+          serverName: server.displayName,
+          sharedGroupId: group.id,
+          sharedGroupName: group.displayName,
+        );
         await _cacheService.updateCache(
           selectedId,
           firewallRules: firewall.$1,
@@ -1679,7 +1867,12 @@ WantedBy=multi-user.target
         );
         break;
       case RefreshScope.docker:
-        final docker = await client.fetchDocker(server.remoteServerId);
+        final docker = await client.fetchDocker(
+          server.remoteServerId,
+          serverName: server.displayName,
+          sharedGroupId: group.id,
+          sharedGroupName: group.displayName,
+        );
         await _storageService.upsertCapability(
           serverId: selectedId,
           dockerInstalled: docker.$3,
@@ -1695,6 +1888,9 @@ WantedBy=multi-user.target
         final result = await client.listFilesSnapshot(
           serverId: server.remoteServerId,
           path: filePath ?? _currentCache?.currentPath ?? '/',
+          serverName: server.displayName,
+          sharedGroupId: group.id,
+          sharedGroupName: group.displayName,
         );
         await _cacheService.updateCache(
           selectedId,
@@ -1918,13 +2114,172 @@ WantedBy=multi-user.target
 
   ShareClient _selectedShareClient() {
     final group = _selectedSharedGroup!;
-    final key = '${group.sourceHostIp}:${group.sourcePort}';
+    final key = '${group.sourceHostIp}:${group.sourcePort}:${group.accessToken}';
     return _shareClients.putIfAbsent(
       key,
       () => ShareClient(
         baseUri: Uri.parse('http://${group.sourceHostIp}:${group.sourcePort}'),
+        accessToken: group.accessToken,
       ),
     );
+  }
+
+  Future<AiCommandExecutor?> _buildAiExecutorForCurrentSelection(
+    String expectedServerId,
+  ) async {
+    if (isSharedSelection) {
+      final group = _selectedSharedGroup;
+      final server = _selectedSharedServer;
+      if (group == null || server == null) {
+        _errorMessage = '共享服务器上下文缺失';
+        notifyListeners();
+        return null;
+      }
+      final ready = await _ensureSharedConnection();
+      if (!ready) {
+        return null;
+      }
+      return SharedAiCommandExecutor(
+        runCommand: ({
+          required String command,
+          required bool privileged,
+        }) {
+          return _selectedShareClient().executeCommand(
+            serverId: server.remoteServerId,
+            command: command,
+            privileged: privileged,
+            userShell: true,
+            serverName: server.displayName,
+            sharedGroupId: group.id,
+            sharedGroupName: group.displayName,
+          );
+        },
+      );
+    }
+
+    final localServer = _selectedServer;
+    if (localServer == null || localServer.id != expectedServerId) {
+      _errorMessage = '请先选择服务器';
+      notifyListeners();
+      return null;
+    }
+    final sessionManager = SshManager();
+    if (!(sessionManager.isConnected &&
+        sessionManager.currentServer?.id == localServer.id)) {
+      final connected = await sessionManager.connect(localServer);
+      if (!connected) {
+        _errorMessage = sessionManager.errorMessage ?? 'SSH 连接失败';
+        notifyListeners();
+        return null;
+      }
+    }
+    return LocalAiCommandExecutor(sessionManager);
+  }
+
+  AiAuditLogger? _buildAiAuditLoggerForCurrentSelection() {
+    if (!isSharedSelection) {
+      return null;
+    }
+    final group = _selectedSharedGroup;
+    final server = _selectedSharedServer;
+    if (group == null || server == null) {
+      return null;
+    }
+    return ({
+      required String action,
+      required String summary,
+      String detail = '',
+      bool success = true,
+    }) async {
+      await _selectedShareClient().logRemoteAudit(
+        category: RemoteAuditCategory.ai,
+        action: action,
+        summary: summary,
+        detail: detail,
+        serverId: server.remoteServerId,
+        serverName: server.displayName,
+        sharedGroupId: group.id,
+        sharedGroupName: group.displayName,
+        success: success,
+      );
+      await refreshRemoteControlState(notify: false);
+    };
+  }
+
+  String _generateAccessTokenValue(DateTime timestamp) {
+    final micros = timestamp.microsecondsSinceEpoch.toRadixString(36);
+    final millis = timestamp.millisecondsSinceEpoch.toRadixString(36);
+    return 'sg_${micros}_$millis';
+  }
+
+  Future<void> _enforceRuntimeLimits() async {
+    await _trimManagedResourcesToLimit();
+    await _enforceActiveAccessTokenLimit();
+  }
+
+  Future<void> _trimManagedResourcesToLimit() async {
+    if (totalManagedServerCount <= maxManagedServerCount) {
+      return;
+    }
+
+    var nextServers = List<Server>.from(_servers);
+    var nextSharedGroups = List<SharedGroupRecord>.from(_sharedGroups);
+    final removedServerIds = <String>[];
+    final removedSharedGroupIds = <String>[];
+
+    int currentTotal() {
+      return nextServers.length +
+          nextSharedGroups.fold<int>(0, (sum, group) => sum + group.servers.length);
+    }
+
+    while (currentTotal() > maxManagedServerCount && nextServers.isNotEmpty) {
+      nextServers.sort((a, b) => _serverSortValue(b).compareTo(_serverSortValue(a)));
+      final removed = nextServers.removeAt(0);
+      removedServerIds.add(removed.id);
+    }
+
+    while (currentTotal() > maxManagedServerCount && nextSharedGroups.isNotEmpty) {
+      nextSharedGroups.sort((a, b) => b.importedAt.compareTo(a.importedAt));
+      final removed = nextSharedGroups.removeAt(0);
+      removedSharedGroupIds.add(removed.id);
+    }
+
+    if (removedServerIds.isEmpty && removedSharedGroupIds.isEmpty) {
+      return;
+    }
+
+    _servers = nextServers;
+    _sharedGroups = nextSharedGroups;
+    await _storageService.saveServers(_servers);
+    for (final serverId in removedServerIds) {
+      await _cacheService.invalidateCache(serverId);
+    }
+    for (final groupId in removedSharedGroupIds) {
+      await _storageService.deleteImportedSharedGroup(groupId);
+    }
+  }
+
+  Future<void> _enforceActiveAccessTokenLimit() async {
+    final activeTokens = _accessTokens
+        .where((token) => !token.isExpired && !token.isRevoked)
+        .toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final overflowCount = activeTokens.length - maxConcurrentAccessTokenCount;
+    if (overflowCount <= 0) {
+      return;
+    }
+    for (final token in activeTokens.take(overflowCount)) {
+      await _storageService.revokeAccessToken(token.id);
+    }
+    _accessTokens = await _storageService.loadAccessTokens();
+  }
+
+  BigInt _serverSortValue(Server server) {
+    final numericId = BigInt.tryParse(server.id.trim());
+    if (numericId != null) {
+      return numericId;
+    }
+    return BigInt.zero;
   }
 
   @override
@@ -1933,6 +2288,9 @@ WantedBy=multi-user.target
     _sshEngine.dispose();
     unawaited(_shareListenerService.stop());
     _sshManager.disconnect();
+    for (final client in _shareClients.values) {
+      unawaited(client.closeConnectionMarker());
+    }
     for (final manager in _aiSessionManagers.values) {
       manager.disconnect();
     }

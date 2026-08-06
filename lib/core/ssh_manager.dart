@@ -119,6 +119,35 @@ class SshExecutionHandle {
   });
 }
 
+class SshTerminalSessionResult {
+  final int? exitCode;
+  final bool disconnected;
+
+  const SshTerminalSessionResult({
+    required this.exitCode,
+    required this.disconnected,
+  });
+}
+
+class SshTerminalSessionHandle {
+  final String sessionId;
+  final Stream<String> stream;
+  final Future<SshTerminalSessionResult> done;
+  final void Function(String data) write;
+  final void Function(int columns, int rows, [int pixelWidth, int pixelHeight])
+      resize;
+  final Future<void> Function() close;
+
+  const SshTerminalSessionHandle({
+    required this.sessionId,
+    required this.stream,
+    required this.done,
+    required this.write,
+    required this.resize,
+    required this.close,
+  });
+}
+
 class SshManager {
   SshManager();
 
@@ -132,6 +161,7 @@ class SshManager {
   SystemInfo? _systemInfoCache;
   final Map<String, StreamController<String>> _outputControllers = {};
   final Map<String, SSHSession> _activeExecutions = {};
+  final Map<String, SSHSession> _activeTerminalSessions = {};
 
   bool get isConnected => _isConnected;
   bool get isConnecting => _isConnecting;
@@ -193,6 +223,12 @@ class SshManager {
       } catch (_) {}
     }
     _activeExecutions.clear();
+    for (final session in _activeTerminalSessions.values) {
+      try {
+        session.close();
+      } catch (_) {}
+    }
+    _activeTerminalSessions.clear();
     for (final controller in _outputControllers.values) {
       try {
         controller.close();
@@ -283,6 +319,139 @@ class SshManager {
 
   Future<SshExecutionHandle> executeCommandStream(String command) async {
     return _executeCommandStreamInternal(command);
+  }
+
+  Future<SshTerminalSessionHandle> openShellSession({
+    String terminalType = 'xterm-256color',
+    int columns = 120,
+    int rows = 32,
+    Map<String, String>? environment,
+  }) async {
+    if (!_isConnected || _client == null) {
+      throw Exception('SSH connection not established');
+    }
+
+    final sessionId = 'shell_${DateTime.now().microsecondsSinceEpoch}';
+    final controller = StreamController<String>.broadcast();
+    final completer = Completer<SshTerminalSessionResult>();
+
+    SSHSession session;
+    try {
+      session = await _client!.shell(
+        pty: SSHPtyConfig(
+          type: terminalType,
+          width: columns,
+          height: rows,
+        ),
+        environment: environment == null || environment.isEmpty
+            ? null
+            : environment,
+      );
+    } catch (error) {
+      final message = error.toString();
+      // Some SSH servers reject env requests unless AcceptEnv is enabled.
+      // Fallback to a plain PTY shell so interactive terminals can still work.
+      if (environment != null &&
+          environment.isNotEmpty &&
+          message.contains('Failed to set environment variable')) {
+        session = await _client!.shell(
+          pty: SSHPtyConfig(
+            type: terminalType,
+            width: columns,
+            height: rows,
+          ),
+        );
+      } else {
+        rethrow;
+      }
+    }
+    _activeTerminalSessions[sessionId] = session;
+
+    Future<void> closeShell({
+      int? exitCode,
+      bool disconnected = false,
+    }) async {
+      final removed = _activeTerminalSessions.remove(sessionId);
+      if (removed == null) {
+        return;
+      }
+      if (!controller.isClosed) {
+        await controller.close();
+      }
+      if (!completer.isCompleted) {
+        completer.complete(
+          SshTerminalSessionResult(
+            exitCode: exitCode,
+            disconnected: disconnected,
+          ),
+        );
+      }
+    }
+
+    void addChunk(String text) {
+      if (text.isEmpty || controller.isClosed) {
+        return;
+      }
+      controller.add(text);
+    }
+
+    utf8.decoder.bind(session.stdout).listen(
+      addChunk,
+      onError: (Object error) => addChunk(error.toString()),
+    );
+
+    utf8.decoder.bind(session.stderr).listen(
+      addChunk,
+      onError: (Object error) => addChunk(error.toString()),
+    );
+
+    session.done
+        .then((_) async {
+          final exitCode = await session.waitForExit(
+            timeout: const Duration(milliseconds: 200),
+          );
+          await closeShell(exitCode: exitCode);
+        })
+        .catchError((Object error) async {
+          addChunk('\r\n${error.toString()}\r\n');
+          await closeShell(disconnected: true);
+        });
+
+    return SshTerminalSessionHandle(
+      sessionId: sessionId,
+      stream: controller.stream,
+      done: completer.future,
+      write: (String data) {
+        if (!_activeTerminalSessions.containsKey(sessionId)) {
+          return;
+        }
+        session.write(Uint8List.fromList(utf8.encode(data)));
+      },
+      resize: (
+        int nextColumns,
+        int nextRows, [
+        int pixelWidth = 0,
+        int pixelHeight = 0,
+      ]) {
+        if (!_activeTerminalSessions.containsKey(sessionId)) {
+          return;
+        }
+        session.resizeTerminal(
+          nextColumns,
+          nextRows,
+          pixelWidth,
+          pixelHeight,
+        );
+      },
+      close: () async {
+        if (_activeTerminalSessions.containsKey(sessionId)) {
+          try {
+            session.close();
+          } catch (_) {}
+        }
+        await closeShell(disconnected: true);
+      },
+    );
   }
 
   Future<SshExecutionHandle> executeUserCommandStream(String command) async {

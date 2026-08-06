@@ -12,7 +12,7 @@ class ShareListenerConfig {
   const ShareListenerConfig({
     this.enabled = false,
     this.port = 8848,
-    this.authMode = ShareAuthMode.none,
+    this.authMode = ShareAuthMode.token,
     this.tokenHint,
   });
 
@@ -54,6 +54,6 @@ class ShareListenerConfig {
         return mode;
       }
     }
-    return ShareAuthMode.none;
+    return ShareAuthMode.token;
   }
 }

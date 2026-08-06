@@ -643,7 +643,18 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
         return;
       }
 
-      final group = await provider.importSharedGroupFromJson(filePath: file.path);
+      final accessToken = await _showAccessTokenInputDialog();
+      if (accessToken == null || accessToken.trim().isEmpty) {
+        if (mounted) {
+          setState(() => _bulkActionStatus = '已取消共享组导入：未提供 token');
+        }
+        return;
+      }
+
+      final group = await provider.importSharedGroupFromJson(
+        filePath: file.path,
+        accessToken: accessToken.trim(),
+      );
       if (!mounted) {
         return;
       }
@@ -694,6 +705,35 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
     }
     setState(() => _bulkActionStatus = '共享组已重命名为 ${nextName.trim()}');
     _showSnackBar('共享组已重命名');
+  }
+
+  Future<String?> _showAccessTokenInputDialog() {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('输入 Access-Token'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Token',
+            hintText: '请输入共享方提供的 access-token',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            style: AppButtonStyles.primary(),
+            child: const Text('验证并导入'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _deleteSharedGroup(String groupId, String currentName) async {
@@ -1203,7 +1243,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
 
   Widget _buildServerQuota(AppProvider provider) {
     final used = provider.totalManagedServerCount;
-    final total = AppProvider.freeServerLimit;
+    final total = provider.maxManagedServerCount;
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -1236,7 +1276,7 @@ class _AssetManagementScreenState extends State<AssetManagementScreen> {
           ),
           const SizedBox(width: 16),
           Text(
-            '（个人免费版最多 10 台总资源，含共享导入 ${provider.importedSharedServerCount} 台）',
+            '（个人免费版最多 $total 台总资源，含共享导入 ${provider.importedSharedServerCount} 台）',
             style: const TextStyle(fontSize: 11, color: Color(0xFF6b7c93)),
           ),
         ],

@@ -99,6 +99,7 @@ class Sidebar extends StatelessWidget {
       {'icon': Icons.show_chart, 'label': '资源监控', 'screen': 'monitoring'},
       {'icon': Icons.folder, 'label': '文件管理', 'screen': 'files'},
       {'icon': Icons.terminal, 'label': 'Web终端', 'screen': 'terminal'},
+      {'icon': Icons.hub, 'label': '远程控制', 'screen': 'remote_control'},
       {'icon': Icons.settings_applications, 'label': '系统设置', 'screen': 'settings'},
     ];
 

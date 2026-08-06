@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/refresh_scope.dart';
@@ -205,11 +207,9 @@ class FirewallScreenState extends State<FirewallScreen> {
       if (rule.source != null && rule.source!.isNotEmpty) '来源 ${rule.source}',
     ].join('，');
 
-    showDialog(
+    final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) {
-        final provider = Provider.of<AppProvider>(dialogContext, listen: false);
-        final navigator = Navigator.of(dialogContext);
         return AlertDialog(
           title: const Text('确认删除规则'),
           content: Text(
@@ -219,65 +219,12 @@ class FirewallScreenState extends State<FirewallScreen> {
           ),
           actions: [
             TextButton(
-              onPressed: navigator.pop,
+              onPressed: () => Navigator.of(dialogContext).pop(false),
               style: AppButtonStyles.text(),
               child: const Text('取消'),
             ),
             TextButton(
-              onPressed: () async {
-                setState(() => _isLoading = true);
-                try {
-                  final ready = await _ensureFirewallSession(provider);
-                  if (!ready) {
-                    return;
-                  }
-                  try {
-                    await provider.manageFirewallSelected(
-                      action: 'delete',
-                      ruleNumber: rule.id,
-                      ruleAction: rule.action,
-                      port: rule.port,
-                      protocol: rule.protocol == 'ALL'
-                          ? null
-                          : rule.protocol.toLowerCase(),
-                      source: rule.source,
-                    );
-                  } catch (_) {
-                    await provider.manageFirewallSelected(
-                      action: 'delete',
-                      ruleAction: rule.action,
-                      port: rule.port,
-                      protocol: rule.protocol == 'ALL'
-                          ? null
-                          : rule.protocol.toLowerCase(),
-                      source: rule.source,
-                    );
-                  }
-                  await provider.requestRefreshNow(
-                    RefreshScope.firewall,
-                    reason: 'firewall-delete-rule',
-                  );
-                  _syncFromCache();
-                  if (mounted) {
-                    ScaffoldMessenger.of(
-                      context,
-                    ).showSnackBar(const SnackBar(content: Text('规则已删除')));
-                  }
-                } catch (e) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(
-                      context,
-                    ).showSnackBar(SnackBar(content: Text('删除规则失败: $e')));
-                  }
-                } finally {
-                  if (mounted) {
-                    setState(() => _isLoading = false);
-                  }
-                  if (navigator.mounted) {
-                    navigator.pop();
-                  }
-                }
-              },
+              onPressed: () => Navigator.of(dialogContext).pop(true),
               style: AppButtonStyles.textDanger(),
               child: const Text('删除'),
             ),
@@ -285,6 +232,70 @@ class FirewallScreenState extends State<FirewallScreen> {
         );
       },
     );
+    if (confirmed == true) {
+      await _deleteRuleConfirmed(rule);
+    }
+  }
+
+  Future<void> _deleteRuleConfirmed(FirewallRule rule) async {
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    setState(() => _isLoading = true);
+    try {
+      final ready = await _ensureFirewallSession(provider);
+      if (!ready) {
+        return;
+      }
+      try {
+        await provider.manageFirewallSelected(
+          action: 'delete',
+          ruleNumber: rule.id,
+          ruleAction: rule.action,
+          port: rule.port,
+          protocol: rule.protocol == 'ALL' ? null : rule.protocol.toLowerCase(),
+          source: rule.source,
+        );
+      } catch (_) {
+        await provider.manageFirewallSelected(
+          action: 'delete',
+          ruleAction: rule.action,
+          port: rule.port,
+          protocol: rule.protocol == 'ALL' ? null : rule.protocol.toLowerCase(),
+          source: rule.source,
+        );
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _rules = _rules.where((item) => item.id != rule.id).toList();
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('规则已删除，正在同步最新状态')));
+      unawaited(_refreshFirewallInBackground(provider));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('删除规则失败: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _refreshFirewallInBackground(AppProvider provider) async {
+    try {
+      await provider.requestRefreshNow(
+        RefreshScope.firewall,
+        reason: 'firewall-delete-rule',
+      );
+      if (mounted) {
+        _syncFromCache();
+      }
+    } catch (_) {}
   }
 
   Future<void> _resetFirewall() async {

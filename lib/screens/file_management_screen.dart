@@ -178,6 +178,9 @@ class FileManagementScreenState extends State<FileManagementScreen> {
       return ShareFileTransferBackend(
         client: provider.currentShareClient!,
         serverId: provider.selectedSharedServer!.remoteServerId,
+          serverName: provider.selectedSharedServer!.displayName,
+          sharedGroupId: provider.selectedSharedGroup!.id,
+          sharedGroupName: provider.selectedSharedGroup!.displayName,
       );
     }
     return SshFileTransferBackend(provider.sshManager);
